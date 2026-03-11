@@ -63,19 +63,19 @@ case "${CMD}" in
         ;;
     backtest)
         echo "Starting backtest runner..."
-        exec python scripts/backtest_strategy.py "$@"
+        exec python /app/scripts/backtest_strategy.py "$@"
         ;;
     replay)
         echo "Starting replay runner..."
-        exec python scripts/replay_session.py "$@"
+        exec python /app/scripts/replay_session.py "$@"
         ;;
     train)
         echo "Starting model training..."
-        exec python scripts/train_model.py "$@"
+        exec python /app/scripts/train_model.py "$@"
         ;;
     evaluate)
         echo "Starting model evaluation..."
-        exec python scripts/evaluate_model.py "$@"
+        exec python /app/scripts/evaluate_model.py "$@"
         ;;
     nlp-replay)
         echo "Starting NLP replay..."

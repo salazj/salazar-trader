@@ -13,7 +13,8 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY app/ app/
 COPY scripts/ scripts/
-RUN pip install --no-cache-dir "."
+RUN pip install --no-cache-dir "." \
+    && rm -rf /app/app/
 
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY .env.example .env.example
@@ -22,7 +23,8 @@ RUN chmod +x /entrypoint.sh
 RUN mkdir -p data logs model_artifacts reports \
     && chown -R botuser:botuser /app
 
-ENV PYTHONUNBUFFERED=1 \
+ENV PROJECT_ROOT=/app \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DRY_RUN=true \
     ENABLE_LIVE_TRADING=false \

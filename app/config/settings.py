@@ -17,7 +17,16 @@ from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+def _resolve_project_root() -> Path:
+    if "PROJECT_ROOT" in os.environ:
+        return Path(os.environ["PROJECT_ROOT"]).resolve()
+    candidate = Path(__file__).resolve().parent.parent.parent
+    if (candidate / "pyproject.toml").exists():
+        return candidate
+    return Path.cwd()
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 _env_path = PROJECT_ROOT / ".env"
 if _env_path.exists():
