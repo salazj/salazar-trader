@@ -1,5 +1,5 @@
 x-common: &common
-  image: ghcr.io/salazj/polymarket-bot:${IMAGE_TAG:-latest}
+  image: ghcr.io/salazj/salazar-trader:${IMAGE_TAG:-latest}
   build: .
   env_file: .env
   restart: unless-stopped
@@ -13,7 +13,7 @@ services:
   # ── Main bot (dry-run by default) ──────────────────────────────────
   bot:
     <<: *common
-    container_name: polybot
+    container_name: salazar-trader
     environment:
       - BOT_MODE=dry-run
       - DRY_RUN=true
@@ -26,7 +26,7 @@ services:
   # ── Backtest runner (one-shot) ─────────────────────────────────────
   backtest:
     <<: *common
-    container_name: polybot-backtest
+    container_name: salazar-trader-backtest
     restart: "no"
     environment:
       - BOT_MODE=backtest
@@ -38,7 +38,7 @@ services:
   # ── Replay runner (one-shot) ───────────────────────────────────────
   replay:
     <<: *common
-    container_name: polybot-replay
+    container_name: salazar-trader-replay
     restart: "no"
     environment:
       - BOT_MODE=replay
@@ -50,7 +50,7 @@ services:
   # ── NLP replay (one-shot) ──────────────────────────────────────────
   nlp-replay:
     <<: *common
-    container_name: polybot-nlp-replay
+    container_name: salazar-trader-nlp-replay
     restart: "no"
     environment:
       - BOT_MODE=replay
@@ -65,7 +65,7 @@ services:
   # ── Model training (one-shot) ──────────────────────────────────────
   train:
     <<: *common
-    container_name: polybot-train
+    container_name: salazar-trader-train
     restart: "no"
     environment:
       - BOT_MODE=train

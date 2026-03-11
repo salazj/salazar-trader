@@ -14,7 +14,7 @@ Pipeline:
 
 Usage:
   python scripts/train_model.py
-  python scripts/train_model.py --db polybot.db --horizon 6 --min-edge 0.02
+  python scripts/train_model.py --db salazar-trader.db --horizon 6 --min-edge 0.02
   python scripts/train_model.py --synthetic --n-samples 3000
 """
 

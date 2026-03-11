@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     ml_model_name: str = "gradient_boosting"
 
     # --- Storage ---
-    database_url: str = f"sqlite:///{PROJECT_ROOT / 'polybot.db'}"
+    database_url: str = f"sqlite:///{PROJECT_ROOT / 'salazar-trader.db'}"
 
     # --- Logging ---
     log_level: str = "INFO"

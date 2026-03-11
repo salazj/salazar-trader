@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> None:
-    print("Bootstrapping Polymarket Bot project...")
+    print("Bootstrapping $alazar-Trader project...")
 
     # Create directories
     for d in ["model_artifacts", "reports", "data", "logs"]:
@@ -31,10 +31,10 @@ def main() -> None:
     from app.storage.repository import Repository
 
     async def init_db() -> None:
-        repo = Repository(str(ROOT / "polybot.db"))
+        repo = Repository(str(ROOT / "salazar-trader.db"))
         await repo.initialize()
         await repo.close()
-        print("  Database initialized: polybot.db")
+        print("  Database initialized: salazar-trader.db")
 
     asyncio.run(init_db())
 

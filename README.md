@@ -1,4 +1,4 @@
-# Prediction Market Trading Bot
+# $alazar-Trader
 
 A professional-grade multi-exchange prediction market trading system supporting **Polymarket** and **Kalshi**, with three intelligence layers, containerized for local development and cloud deployment.
 
@@ -73,11 +73,11 @@ The fastest way to deploy — no build step, no source code needed.
 ### 1. Set up
 
 ```bash
-mkdir polymarket-bot && cd polymarket-bot
+mkdir salazar-trader && cd salazar-trader
 mkdir -p data logs model_artifacts reports
 
 # Download the example env file
-curl -sO https://raw.githubusercontent.com/salazj/polymarket-bot/main/.env.example
+curl -sO https://raw.githubusercontent.com/salazj/salazar-trader/main/.env.example
 cp .env.example .env
 # Edit .env with your settings (all secrets go here)
 ```
@@ -85,36 +85,36 @@ cp .env.example .env
 ### 2. Pull and run
 
 ```bash
-docker pull ghcr.io/salazj/polymarket-bot:latest
+docker pull ghcr.io/salazj/salazar-trader:latest
 
-docker run -d --name polybot \
+docker run -d --name salazar-trader \
   --env-file .env \
   -v ./data:/app/data \
   -v ./logs:/app/logs \
   -v ./model_artifacts:/app/model_artifacts \
   -v ./reports:/app/reports \
   -p 8880:8880 \
-  ghcr.io/salazj/polymarket-bot:latest
+  ghcr.io/salazj/salazar-trader:latest
 ```
 
 ### 3. Check status
 
 ```bash
-docker logs -f polybot
+docker logs -f salazar-trader
 curl http://localhost:8880/health
 ```
 
 ### 4. Stop
 
 ```bash
-docker stop polybot && docker rm polybot
+docker stop salazar-trader && docker rm salazar-trader
 ```
 
 ### 5. Update to latest version
 
 ```bash
-docker pull ghcr.io/salazj/polymarket-bot:latest
-docker stop polybot && docker rm polybot
+docker pull ghcr.io/salazj/salazar-trader:latest
+docker stop salazar-trader && docker rm salazar-trader
 # Re-run the docker run command from step 2
 ```
 
@@ -132,8 +132,8 @@ For running multiple services (backtest, replay, training) alongside the bot.
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/salazj/polymarket-bot.git
-cd polymarket-bot
+git clone https://github.com/salazj/salazar-trader.git
+cd salazar-trader
 cp .env.example .env
 # Edit .env with your settings (all secrets go here, never in the image)
 ```
@@ -260,7 +260,7 @@ docker compose run --rm train --synthetic
 
 # Local
 python scripts/train_model.py --synthetic
-python scripts/train_model.py --db polybot.db --horizon 6
+python scripts/train_model.py --db salazar-trader.db --horizon 6
 ```
 
 Model artifacts are persisted in `model_artifacts/`.
@@ -380,7 +380,7 @@ The LLM outputs a JSON object that is parsed into a `ClassificationResult`. When
 ### Pull Pre-Built Image
 
 ```bash
-docker pull ghcr.io/salazj/polymarket-bot:latest
+docker pull ghcr.io/salazj/salazar-trader:latest
 ```
 
 ### Build from Source (optional)
@@ -496,17 +496,17 @@ sudo usermod -aG docker $USER
 newgrp docker
 
 # 2. Set up
-mkdir polymarket-bot && cd polymarket-bot
+mkdir salazar-trader && cd salazar-trader
 mkdir -p data logs model_artifacts reports
 
 # 3. Configure
-curl -sO https://raw.githubusercontent.com/salazj/polymarket-bot/main/.env.example
+curl -sO https://raw.githubusercontent.com/salazj/salazar-trader/main/.env.example
 cp .env.example .env
 nano .env  # set your credentials and desired mode
 
 # 4. Pull and start (no build needed)
-docker pull ghcr.io/salazj/polymarket-bot:latest
-docker run -d --name polybot \
+docker pull ghcr.io/salazj/salazar-trader:latest
+docker run -d --name salazar-trader \
   --restart unless-stopped \
   --env-file .env \
   -v ./data:/app/data \
@@ -514,27 +514,27 @@ docker run -d --name polybot \
   -v ./model_artifacts:/app/model_artifacts \
   -v ./reports:/app/reports \
   -p 8880:8880 \
-  ghcr.io/salazj/polymarket-bot:latest
+  ghcr.io/salazj/salazar-trader:latest
 
 # 5. Monitor
-docker logs -f polybot
+docker logs -f salazar-trader
 curl http://localhost:8880/health
 ```
 
 ### Systemd Service (Optional)
 
-Create `/etc/systemd/system/polybot.service`:
+Create `/etc/systemd/system/salazar-trader.service`:
 
 ```ini
 [Unit]
-Description=Polymarket Trading Bot
+Description=Salazar Trader
 After=docker.service
 Requires=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/user/polymarket-bot
+WorkingDirectory=/home/user/salazar-trader
 ExecStart=/usr/bin/docker compose up -d bot
 ExecStop=/usr/bin/docker compose down
 TimeoutStartSec=120
@@ -544,9 +544,9 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl enable polybot
-sudo systemctl start polybot
-sudo systemctl status polybot
+sudo systemctl enable salazar-trader
+sudo systemctl start salazar-trader
+sudo systemctl status salazar-trader
 ```
 
 ### Resource Requirements
