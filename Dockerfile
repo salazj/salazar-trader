@@ -11,10 +11,10 @@ RUN groupadd --gid 1000 botuser \
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e ".[dev]"
-
 COPY app/ app/
 COPY scripts/ scripts/
+RUN pip install --no-cache-dir "."
+
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY .env.example .env.example
 RUN chmod +x /entrypoint.sh
