@@ -269,9 +269,10 @@ Set in `.env`:
 NLP_PROVIDER=newsapi
 NEWSAPI_KEY=your-newsapi-key
 
-# LLM provider: none | openai
-LLM_PROVIDER=openai
+# LLM provider: none | local_open_source | hosted_api
+LLM_PROVIDER=hosted_api
 LLM_MODEL_NAME=gpt-4o-mini
+LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=sk-your-openai-key
 ```
 
