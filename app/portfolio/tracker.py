@@ -33,7 +33,7 @@ class PortfolioTracker:
 
     def __init__(self, settings: Settings, starting_cash: float | None = None) -> None:
         self._settings = settings
-        self._cash = starting_cash if starting_cash is not None else 100.0
+        self._cash = starting_cash if starting_cash is not None else 0.0
         self._initial_cash = self._cash
         self._positions: dict[str, Position] = {}  # keyed by instrument_id
         self._realized_pnl = 0.0

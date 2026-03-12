@@ -235,6 +235,12 @@ class TradingBot:
                 self._portfolio._cash = exchange_balance
                 self._portfolio._initial_cash = exchange_balance
                 logger.info("exchange_balance_synced", balance=exchange_balance)
+            else:
+                logger.warning(
+                    "exchange_balance_zero",
+                    balance=exchange_balance,
+                    hint="API returned $0. Check that API credentials are valid and KALSHI_DEMO_MODE matches your intended account.",
+                )
         except Exception as e:
             logger.warning("exchange_balance_fetch_failed", error=str(e))
 

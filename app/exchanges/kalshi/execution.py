@@ -54,7 +54,11 @@ class KalshiExecutionClient(BaseExecutionClient):
         self._auth: KalshiAuth | None = None
         self._client: httpx.AsyncClient | None = None
 
-        if not self._dry_run and settings.kalshi_api_key and (settings.kalshi_private_key or settings.kalshi_private_key_path):
+        has_creds = bool(
+            settings.kalshi_api_key
+            and (settings.kalshi_private_key or settings.kalshi_private_key_path)
+        )
+        if has_creds:
             self._auth = KalshiAuth(
                 settings.kalshi_api_key,
                 settings.kalshi_private_key_path,
@@ -65,7 +69,12 @@ class KalshiExecutionClient(BaseExecutionClient):
                 timeout=DEFAULT_TIMEOUT,
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
             )
-            logger.info("kalshi_live_client_initialized", base_url=self._base_url)
+            logger.info(
+                "kalshi_client_initialized",
+                base_url=self._base_url,
+                dry_run=self._dry_run,
+                demo_mode=settings.kalshi_demo_mode,
+            )
 
     @property
     def is_dry_run(self) -> bool:
@@ -259,18 +268,20 @@ class KalshiExecutionClient(BaseExecutionClient):
     # ── Account queries ───────────────────────────────────────────────
 
     async def get_balance(self) -> float:
-        if self._dry_run:
+        if self._client is None:
             return 0.0
         try:
             data = await self._request("GET", "/portfolio/balance")
             balance_cents = data.get("balance", 0)
-            return cents_to_decimal(balance_cents)
+            balance = cents_to_decimal(balance_cents)
+            logger.info("kalshi_balance_fetched", balance=balance)
+            return balance
         except Exception as e:
             logger.warning("kalshi_balance_error", error=str(e))
             return 0.0
 
     async def get_open_positions(self) -> list[dict[str, Any]]:
-        if self._dry_run:
+        if self._client is None:
             return []
         try:
             data = await self._request("GET", "/portfolio/positions")
@@ -282,7 +293,7 @@ class KalshiExecutionClient(BaseExecutionClient):
 
     async def get_open_orders(self) -> list[dict[str, Any]]:
         """Query currently resting orders from Kalshi."""
-        if self._dry_run:
+        if self._client is None:
             return []
         try:
             data = await self._request("GET", "/portfolio/orders")
@@ -294,7 +305,7 @@ class KalshiExecutionClient(BaseExecutionClient):
 
     async def get_fills(self, ticker: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Query historical fills from Kalshi."""
-        if self._dry_run:
+        if self._client is None:
             return []
         try:
             params: dict[str, Any] = {"limit": limit}
