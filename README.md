@@ -10,18 +10,18 @@ A multi-asset trading platform with a **web GUI**, supporting **prediction marke
 | Prediction Markets | Kalshi | `ASSET_CLASS=prediction_markets` `EXCHANGE=kalshi` |
 | Equities | Alpaca | `ASSET_CLASS=equities` `BROKER=alpaca` |
 
+Pre-built images are available for **linux/amd64** and **linux/arm64** (Intel/AMD and Apple Silicon / ARM servers).
+
 ---
 
-## Quick Start (Docker Compose — recommended)
-
-This is the primary way to run the platform. It launches the backend API, the web GUI, and manages the bot lifecycle through the browser.
+## Quick Start
 
 ### Prerequisites
 
 - Docker 20.10+
 - Docker Compose v2+
 
-### 1. Clone and configure
+### 1. Get the config files
 
 ```bash
 git clone https://github.com/salazj/salazar-trader.git
@@ -61,19 +61,21 @@ ALPACA_PAPER=true
 ### 2. Launch
 
 ```bash
-docker compose up --build
+docker compose up -d
 ```
 
-This starts two containers:
+Docker pulls the pre-built images from GHCR and starts two containers:
 
-| Service | Port | Description |
-|---------|------|-------------|
-| `backend` | 8000 | FastAPI server + BotManager (manages the trading bot) |
-| `frontend` | **3000** | React web GUI served by nginx, proxies API/WS to backend |
+| Container | Image | Port | Description |
+|-----------|-------|------|-------------|
+| `salazar-backend` | `ghcr.io/salazj/salazar-trader` | 8000 | FastAPI server + BotManager |
+| `salazar-frontend` | `ghcr.io/salazj/salazar-trader-frontend` | **3000** | React GUI (nginx reverse proxy) |
+
+No build step required. Images are pulled automatically for your architecture (amd64 or arm64).
 
 ### 3. Open the GUI
 
-Open your browser to **http://localhost:3000**
+Open **http://localhost:3000** in your browser.
 
 From the GUI you can:
 - Select a mode (Polymarket, Kalshi, or Stocks)
@@ -90,6 +92,13 @@ From the GUI you can:
 
 ```bash
 docker compose down
+```
+
+### 5. Update to latest version
+
+```bash
+docker compose pull
+docker compose up -d
 ```
 
 ---
@@ -162,43 +171,31 @@ All layers produce `NormalizedSignal` objects that the ensemble evaluates with c
 
 ---
 
-## Project Structure
+## Docker Images
 
+| Image | Architectures | Tags |
+|-------|---------------|------|
+| `ghcr.io/salazj/salazar-trader` | `linux/amd64`, `linux/arm64` | `latest`, `3.0.0` |
+| `ghcr.io/salazj/salazar-trader-frontend` | `linux/amd64`, `linux/arm64` | `latest`, `3.0.0` |
+
+Pull individually if needed:
+
+```bash
+docker pull ghcr.io/salazj/salazar-trader:latest
+docker pull ghcr.io/salazj/salazar-trader-frontend:latest
 ```
-├── app/
-│   ├── api/            FastAPI backend, BotManager, WebSocket endpoints
-│   ├── config/         Settings, env loading, validation
-│   ├── exchanges/      Exchange adapters (Polymarket, Kalshi)
-│   ├── brokers/        Broker adapters (Alpaca)
-│   ├── stocks/         Stock-specific strategies, features, risk, execution
-│   ├── models/         Normalized cross-asset data models
-│   ├── data/           Orderbook, features, domain models
-│   ├── strategies/     Strategy interface + implementations (L1)
-│   ├── research/       ML training pipeline (L2)
-│   ├── nlp/            NLP classifiers, providers, pipeline (L3)
-│   ├── decision/       Signal registry, ensemble, traces
-│   ├── execution/      Exchange-agnostic order management
-│   ├── risk/           Risk checks, circuit breaker
-│   ├── portfolio/      Position tracking, PnL
-│   ├── storage/        SQLite repository
-│   ├── backtesting/    Offline strategy evaluation
-│   ├── replay/         Session playback
-│   ├── monitoring/     Logging, health endpoint
-│   └── main.py         Bot orchestrator
-├── frontend/           React + Vite + Tailwind web GUI
-│   ├── src/
-│   │   ├── pages/      Dashboard, Config, Logs, Portfolio, Risk
-│   │   ├── components/ UI components (sidebar, toast, status badge)
-│   │   ├── hooks/      WebSocket hooks for live data
-│   │   └── api/        API client and TypeScript types
-│   ├── Dockerfile      Multi-stage Node → nginx build
-│   └── nginx.conf      Reverse proxy config
-├── docker-compose.yml  Backend + Frontend orchestration
-├── Dockerfile          Backend image
-├── docker/             Entrypoint script
-├── tests/              Comprehensive test suite
-└── docs/               Architecture, API, GUI, deployment guides
+
+---
+
+## Alternative: Build from Source
+
+If you want to build the images locally instead of pulling from GHCR:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 ```
+
+This uses the `docker-compose.build.yml` override to build from the local `Dockerfile` and `frontend/Dockerfile`.
 
 ---
 
@@ -210,8 +207,7 @@ If you prefer CLI-only operation without the web GUI:
 # Using Docker Compose with the standalone profile
 docker compose --profile standalone up bot
 
-# Or using a pre-built image directly
-docker pull ghcr.io/salazj/salazar-trader:latest
+# Or using the image directly
 docker run -d --name salazar-trader \
   --restart unless-stopped \
   --env-file .env \
@@ -258,9 +254,7 @@ docker compose run --rm --profile tools backtest --strategy momentum_scalper
 # Train ML model
 docker compose run --rm --profile tools train --synthetic
 
-# Run tests
-docker compose run --rm backend pytest -v --tb=short
-# or locally:
+# Run tests locally
 pytest -v --tb=short
 ```
 
@@ -319,14 +313,14 @@ cd salazar-trader
 cp .env.example .env
 nano .env  # set your credentials
 
-# Launch
-docker compose up -d --build
+# Pull and launch (no build needed)
+docker compose up -d
 
 # Access the GUI
 # http://<your-vm-ip>:3000
 ```
 
-The GUI is responsive and works on phone browsers. For HTTPS, put a reverse proxy (Caddy, nginx) in front of port 3000.
+Works on any architecture (Intel, AMD, ARM, Apple Silicon VMs). The GUI is responsive and works on phone browsers. For HTTPS, put a reverse proxy (Caddy, nginx) in front of port 3000.
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instructions.
 
@@ -342,6 +336,47 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instruction
 | `./reports` | PnL reports, training reports |
 
 These are mounted from the host. Data persists across container restarts.
+
+---
+
+## Project Structure
+
+```
+├── app/
+│   ├── api/            FastAPI backend, BotManager, WebSocket endpoints
+│   ├── config/         Settings, env loading, validation
+│   ├── exchanges/      Exchange adapters (Polymarket, Kalshi)
+│   ├── brokers/        Broker adapters (Alpaca)
+│   ├── stocks/         Stock-specific strategies, features, risk, execution
+│   ├── models/         Normalized cross-asset data models
+│   ├── data/           Orderbook, features, domain models
+│   ├── strategies/     Strategy interface + implementations (L1)
+│   ├── research/       ML training pipeline (L2)
+│   ├── nlp/            NLP classifiers, providers, pipeline (L3)
+│   ├── decision/       Signal registry, ensemble, traces
+│   ├── execution/      Exchange-agnostic order management
+│   ├── risk/           Risk checks, circuit breaker
+│   ├── portfolio/      Position tracking, PnL
+│   ├── storage/        SQLite repository
+│   ├── backtesting/    Offline strategy evaluation
+│   ├── replay/         Session playback
+│   ├── monitoring/     Logging, health endpoint
+│   └── main.py         Bot orchestrator
+├── frontend/           React + Vite + Tailwind web GUI
+│   ├── src/
+│   │   ├── pages/      Dashboard, Config, Logs, Portfolio, Risk
+│   │   ├── components/ UI components (sidebar, toast, status badge)
+│   │   ├── hooks/      WebSocket hooks for live data
+│   │   └── api/        API client and TypeScript types
+│   ├── Dockerfile      Multi-stage Node → nginx build
+│   └── nginx.conf      Reverse proxy config
+├── docker-compose.yml       Pull-and-run orchestration (uses GHCR images)
+├── docker-compose.build.yml Override to build from source
+├── Dockerfile               Backend image
+├── docker/                  Entrypoint script
+├── tests/                   Comprehensive test suite
+└── docs/                    Architecture, API, GUI, deployment guides
+```
 
 ---
 

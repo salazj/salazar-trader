@@ -7,7 +7,7 @@ x-common-volumes: &common-volumes
 services:
   # ── Backend (FastAPI + BotManager) ─────────────────────────────────
   backend:
-    build: .
+    image: ghcr.io/salazj/salazar-trader:latest
     container_name: salazar-backend
     env_file: .env
     restart: unless-stopped
@@ -24,7 +24,7 @@ services:
 
   # ── Frontend (React served by nginx, proxies to backend) ───────────
   frontend:
-    build: ./frontend
+    image: ghcr.io/salazj/salazar-trader-frontend:latest
     container_name: salazar-frontend
     restart: unless-stopped
     ports:
@@ -35,7 +35,7 @@ services:
 
   # ── Legacy standalone bot (for CLI usage without GUI) ──────────────
   bot:
-    build: .
+    image: ghcr.io/salazj/salazar-trader:latest
     container_name: salazar-trader
     env_file: .env
     restart: unless-stopped
@@ -48,7 +48,7 @@ services:
 
   # ── Backtest runner (one-shot) ─────────────────────────────────────
   backtest:
-    build: .
+    image: ghcr.io/salazj/salazar-trader:latest
     container_name: salazar-trader-backtest
     env_file: .env
     restart: "no"
@@ -62,7 +62,7 @@ services:
 
   # ── Model training (one-shot) ──────────────────────────────────────
   train:
-    build: .
+    image: ghcr.io/salazj/salazar-trader:latest
     container_name: salazar-trader-train
     env_file: .env
     restart: "no"
