@@ -1,5 +1,6 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useWebSocket } from "./useWebSocket";
+import { api } from "@/api/client";
 import type { Portfolio, OrderItem } from "@/api/types";
 
 const defaultPortfolio: Portfolio = {
@@ -10,16 +11,31 @@ const defaultPortfolio: Portfolio = {
 export function usePortfolio() {
   const [portfolio, setPortfolio] = useState<Portfolio>(defaultPortfolio);
   const [recentOrders, setRecentOrders] = useState<OrderItem[]>([]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getPortfolio().then((p) => {
+      if (!cancelled) {
+        setPortfolio(p);
+        setLoaded(true);
+      }
+    }).catch(() => {
+      if (!cancelled) setLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const onMessage = useCallback((data: unknown) => {
     const msg = data as { type: string; portfolio?: Portfolio; recent_orders?: OrderItem[] };
     if (msg.type === "portfolio") {
       if (msg.portfolio) setPortfolio(msg.portfolio);
       if (msg.recent_orders) setRecentOrders(msg.recent_orders);
+      setLoaded(true);
     }
   }, []);
 
   const { connected } = useWebSocket({ url: "/ws/portfolio", onMessage });
 
-  return { portfolio, recentOrders, connected };
+  return { portfolio, recentOrders, connected, loaded };
 }

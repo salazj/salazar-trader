@@ -104,8 +104,46 @@ class KalshiMarketDataClient(BaseMarketDataClient):
             if not cursor:
                 break
             logger.debug("kalshi_paging_markets", page=page_num + 1, fetched=len(all_markets))
+
+        cat_map = await self.get_event_categories()
+        if cat_map:
+            for market in all_markets:
+                event_ticker = (market.exchange_data or {}).get("event_ticker", "")
+                cat = cat_map.get(event_ticker, "")
+                if cat:
+                    market.category = cat
+                    market.exchange_data["category"] = cat
+
         logger.info("kalshi_fetched_all_markets", total=len(all_markets))
         return all_markets
+
+    async def get_event_categories(self) -> dict[str, str]:
+        """Fetch events and return a mapping of event_ticker -> category."""
+        cat_map: dict[str, str] = {}
+        cursor = ""
+        try:
+            for _ in range(20):
+                params: dict[str, Any] = {"limit": 200, "status": "open"}
+                if cursor:
+                    params["cursor"] = cursor
+                data = await self._get("/events", params=params)
+                for event in data.get("events", []):
+                    ticker = event.get("event_ticker", "")
+                    category = event.get("category", "")
+                    if ticker and category:
+                        cat_map[ticker] = category.lower()
+                cursor = data.get("cursor", "")
+                if not cursor:
+                    break
+            logger.info("kalshi_event_categories_fetched", count=len(cat_map))
+        except Exception as e:
+            logger.warning("kalshi_event_categories_error", error=str(e))
+        return cat_map
+
+    async def get_available_categories(self) -> list[str]:
+        """Return sorted list of unique market categories from Kalshi events."""
+        cat_map = await self.get_event_categories()
+        return sorted(set(cat_map.values()))
 
     async def get_market(self, market_id: str) -> Market | None:
         try:

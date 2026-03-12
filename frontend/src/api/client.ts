@@ -84,4 +84,6 @@ export const api = {
 
   getExchanges: () => request<ExchangeInfo[]>("/api/exchanges"),
   getStrategies: () => request<StrategyInfo[]>("/api/strategies"),
+  getCategories: (exchange = "kalshi") =>
+    request<string[]>(`/api/exchanges/categories?exchange=${exchange}`),
 };

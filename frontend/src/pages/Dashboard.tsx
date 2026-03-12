@@ -29,7 +29,7 @@ import { useState } from "react";
 export default function Dashboard() {
   const navigate = useNavigate();
   const { botStatus, riskState, connected } = useBotStatus();
-  const { portfolio, recentOrders, connected: portfolioConnected } = usePortfolio();
+  const { portfolio, recentOrders, connected: portfolioConnected, loaded: portfolioLoaded } = usePortfolio();
   const { addToast } = useToast();
   const [stopping, setStopping] = useState(false);
 
@@ -53,7 +53,7 @@ export default function Dashboard() {
   const modeLabel = botStatus.asset_class === "equities" ? botStatus.broker : botStatus.exchange;
   const pnlPositive = portfolio.daily_pnl >= 0;
   const lossRatio = riskState.max_daily_loss > 0 ? Math.abs(riskState.daily_loss) / riskState.max_daily_loss : 0;
-  const dataReady = connected && portfolioConnected;
+  const dataReady = connected && (portfolioConnected || portfolioLoaded);
 
   return (
     <div className="space-y-6">

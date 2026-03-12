@@ -21,13 +21,13 @@ router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 @router.get("", response_model=PortfolioResponse)
 async def get_portfolio(request: Request) -> PortfolioResponse:
     mgr = request.app.state.bot_manager
-    return mgr.get_portfolio()
+    return await mgr.get_portfolio()
 
 
 @router.get("/positions", response_model=list[PositionItem])
 async def get_positions(request: Request) -> list[PositionItem]:
     mgr = request.app.state.bot_manager
-    portfolio = mgr.get_portfolio()
+    portfolio = await mgr.get_portfolio()
     return portfolio.positions
 
 

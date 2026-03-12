@@ -46,6 +46,7 @@ export default function Config() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [validated, setValidated] = useState(false);
+  const [availableCategories, setAvailableCategories] = useState<string[]>([]);
   const { addToast } = useToast();
 
   useEffect(() => {
@@ -63,6 +64,7 @@ export default function Config() {
       }
     }).catch(() => {});
     api.getPresets().then(setPresets).catch(() => {});
+    api.getCategories(config.exchange).then(setAvailableCategories).catch(() => {});
   }, []);
 
   const update = (partial: Partial<RunConfig>) => {
@@ -147,6 +149,7 @@ export default function Config() {
       update({ asset_class: "equities", broker: "alpaca" });
     } else {
       update({ asset_class: "prediction_markets", exchange: mode });
+      api.getCategories(mode).then(setAvailableCategories).catch(() => {});
     }
   };
 
@@ -382,13 +385,13 @@ export default function Config() {
               </FormField>
             </div>
 
-            <FormField label="Only include these categories" hint="Leave blank to trade all categories" tip="Filter markets by category. Only markets in these categories will be considered.">
-              <input type="text" value={config.include_categories} onChange={(e) => update({ include_categories: e.target.value })} placeholder="politics, sports, crypto, entertainment" className={INPUT} />
-            </FormField>
-
-            <FormField label="Exclude these categories" hint="Markets in these categories will be skipped" tip="Block specific categories you don't want to trade.">
-              <input type="text" value={config.exclude_categories} onChange={(e) => update({ exclude_categories: e.target.value })} placeholder="" className={INPUT} />
-            </FormField>
+            <CategoryPicker
+              available={availableCategories}
+              included={config.include_categories}
+              excluded={config.exclude_categories}
+              onIncludedChange={(v) => update({ include_categories: v })}
+              onExcludedChange={(v) => update({ exclude_categories: v })}
+            />
 
             <FormField label="Target specific markets" hint="Leave empty for automatic market discovery" tip="If you know the exact market IDs (slugs) you want to trade, enter them here. Otherwise leave blank and the bot will find markets automatically.">
               <input
@@ -639,6 +642,129 @@ function SliderField({ label, value, onChange, tip }: { label: string; value: nu
         <span className="text-sm font-mono tabular-nums text-muted-foreground">{(value * 100).toFixed(0)}%</span>
       </div>
       <input type="range" min={0} max={1} step={0.05} value={value} onChange={(e) => onChange(+e.target.value)} className="w-full" />
+    </div>
+  );
+}
+
+const CATEGORY_ICONS: Record<string, string> = {
+  "climate and weather": "🌦️",
+  companies: "🏢",
+  economics: "📊",
+  elections: "🗳️",
+  entertainment: "🎬",
+  financials: "💰",
+  health: "🏥",
+  politics: "🏛️",
+  "science and technology": "🔬",
+  social: "👥",
+  sports: "⚽",
+  world: "🌍",
+};
+
+function CategoryPicker({
+  available,
+  included,
+  excluded,
+  onIncludedChange,
+  onExcludedChange,
+}: {
+  available: string[];
+  included: string;
+  excluded: string;
+  onIncludedChange: (v: string) => void;
+  onExcludedChange: (v: string) => void;
+}) {
+  const includedSet = new Set(
+    included
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const excludedSet = new Set(
+    excluded
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const allSelected = includedSet.size === 0 && excludedSet.size === 0;
+
+  const toggleCategory = (cat: string) => {
+    const c = cat.toLowerCase();
+    if (includedSet.has(c)) {
+      includedSet.delete(c);
+      excludedSet.add(c);
+    } else if (excludedSet.has(c)) {
+      excludedSet.delete(c);
+    } else {
+      includedSet.add(c);
+    }
+    onIncludedChange([...includedSet].join(", "));
+    onExcludedChange([...excludedSet].join(", "));
+  };
+
+  const selectAll = () => {
+    onIncludedChange("");
+    onExcludedChange("");
+  };
+
+  const cats = available.length > 0 ? available : Object.keys(CATEGORY_ICONS);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <label className="text-sm font-medium flex items-center">
+          Market Categories
+          <InfoTip text="Click a category to include it (green). Click again to exclude it (red). Click once more to reset. When nothing is selected, all categories are traded." />
+        </label>
+        <button
+          type="button"
+          onClick={selectAll}
+          className={`text-xs px-2 py-1 rounded transition-colors ${
+            allSelected
+              ? "text-emerald-400 bg-emerald-950/30"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {allSelected ? "✓ All Categories" : "Reset to All"}
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {cats.map((cat) => {
+          const c = cat.toLowerCase();
+          const isIncluded = includedSet.has(c);
+          const isExcluded = excludedSet.has(c);
+          const icon = CATEGORY_ICONS[c] || "📁";
+          const friendlyName = cat.replace(/\b\w/g, (l) => l.toUpperCase());
+
+          let style =
+            "border-border text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground";
+          if (isIncluded) {
+            style = "border-emerald-500/60 bg-emerald-950/30 text-emerald-300";
+          } else if (isExcluded) {
+            style = "border-red-500/40 bg-red-950/20 text-red-400 line-through opacity-60";
+          }
+
+          return (
+            <button
+              key={cat}
+              type="button"
+              onClick={() => toggleCategory(cat)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-all duration-150 ${style}`}
+            >
+              <span>{icon}</span>
+              {friendlyName}
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-[11px] text-muted-foreground mt-2">
+        {allSelected
+          ? "Trading all categories — click any to filter"
+          : `${includedSet.size > 0 ? `${includedSet.size} included` : ""}${
+              includedSet.size > 0 && excludedSet.size > 0 ? " · " : ""
+            }${excludedSet.size > 0 ? `${excludedSet.size} excluded` : ""}`}
+      </p>
     </div>
   );
 }

@@ -16,7 +16,7 @@ async def ws_portfolio(websocket: WebSocket) -> None:
 
     try:
         while True:
-            portfolio = mgr.get_portfolio()
+            portfolio = await mgr.get_portfolio()
             orders = mgr.get_orders(limit=20)
             await websocket.send_json({
                 "type": "portfolio",

@@ -46,6 +46,9 @@ class BotManager:
         self._error: str | None = None
         self._session_id: str = ""
         self._lock = asyncio.Lock()
+        self._cached_balance: float = 0.0
+        self._balance_fetched_at: float = 0.0
+        self._balance_lock = asyncio.Lock()
 
     # ── Status ─────────────────────────────────────────────────────────
 
@@ -143,9 +146,38 @@ class BotManager:
 
     # ── Portfolio / Risk accessors ─────────────────────────────────────
 
-    def get_portfolio(self) -> PortfolioResponse:
+    async def _fetch_exchange_balance(self) -> float:
+        """Fetch balance directly from the exchange when bot is not running."""
+        now = time.time()
+        if now - self._balance_fetched_at < 30 and self._cached_balance > 0:
+            return self._cached_balance
+
+        async with self._balance_lock:
+            now = time.time()
+            if now - self._balance_fetched_at < 30 and self._cached_balance > 0:
+                return self._cached_balance
+            try:
+                settings = get_settings()
+                if settings.has_kalshi_credentials:
+                    from app.exchanges.kalshi.execution import KalshiExecutionClient
+                    client = KalshiExecutionClient(settings)
+                    try:
+                        balance = await client.get_balance()
+                        self._cached_balance = balance
+                        self._balance_fetched_at = time.time()
+                        logger.info("idle_balance_fetched", balance=balance)
+                        return balance
+                    finally:
+                        await client.close()
+                return 0.0
+            except Exception as e:
+                logger.warning("idle_balance_fetch_error", error=str(e))
+                return self._cached_balance
+
+    async def get_portfolio(self) -> PortfolioResponse:
         if self._bot is None:
-            return PortfolioResponse()
+            balance = await self._fetch_exchange_balance()
+            return PortfolioResponse(cash=balance)
         try:
             snap = self._bot._portfolio.get_snapshot()
             positions = [
