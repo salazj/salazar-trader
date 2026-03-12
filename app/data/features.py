@@ -113,6 +113,8 @@ class FeatureEngine:
             ref = (best_bid + best_ask) / 2.0 if best_bid and best_ask else 0.5
             bid_depth = compute_depth_within(book.bids, ref, 0.05)
             ask_depth = compute_depth_within(book.asks, ref, 0.05)
+            if best_bid is not None or best_ask is not None:
+                self._last_update = time.time()
 
         spread = None
         mid = None

@@ -91,7 +91,16 @@ class ExecutionEngine:
             logger.warning("unknown_signal_action", action=signal.action)
             return None
 
-        price = round_price(signal.suggested_price or 0.0)
+        raw_price = signal.suggested_price
+        if raw_price is None or raw_price <= 0:
+            if side == Side.BUY and features.best_ask is not None:
+                raw_price = features.best_ask
+            elif side == Side.SELL and features.best_bid is not None:
+                raw_price = features.best_bid
+            elif features.mid_price is not None:
+                raw_price = features.mid_price
+
+        price = round_price(raw_price or 0.0)
         size = round_size(signal.suggested_size or self._settings.default_order_size)
 
         if price <= 0 or price >= 1.0:

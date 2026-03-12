@@ -278,13 +278,15 @@ class TradingBot:
             watchlist_stats=self._universe.stats,
         )
 
-        # Fetch initial orderbook snapshots via REST (only overwrite if API returns data)
+        # Fetch initial orderbook snapshots via REST (only overwrite if API returns both sides)
+        rest_overwrite_count = 0
+        rest_skip_count = 0
         for iid in instrument_ids:
             try:
                 book_data = await self._adapter.market_data.get_orderbook(iid)
                 bids = book_data.get("bids", [])
                 asks = book_data.get("asks", [])
-                if bids or asks:
+                if bids and asks:
                     market = self._instrument_to_market[iid]
                     self._orderbook.apply_snapshot(
                         market_id=market.market_id,
@@ -292,8 +294,12 @@ class TradingBot:
                         bids=bids,
                         asks=asks,
                     )
+                    rest_overwrite_count += 1
+                else:
+                    rest_skip_count += 1
             except Exception as e:
                 logger.warning("initial_book_fetch_failed", instrument_id=iid, error=str(e))
+        logger.info("initial_book_fetch_complete", overwritten=rest_overwrite_count, skipped=rest_skip_count, total=len(instrument_ids))
 
         # Subscribe to WebSocket feeds
         ws = self._adapter.websocket
@@ -460,6 +466,8 @@ class TradingBot:
     async def _setup_market_instruments(self, markets: list[Market]) -> list[str]:
         """Register markets: save to DB, build instrument mapping and feature engines."""
         instrument_ids: list[str] = []
+        seeded_count = 0
+        no_price_count = 0
         for market in markets:
             yes_price = (market.exchange_data or {}).get("yes_price")
 
@@ -474,6 +482,9 @@ class TradingBot:
                             market.exchange_data["no_price"] = (fresh.exchange_data or {}).get("no_price")
                             market.exchange_data["volume"] = (fresh.exchange_data or {}).get("volume", 0)
                             market.exchange_data["open_interest"] = (fresh.exchange_data or {}).get("open_interest", 0)
+                            logger.info("market_price_refreshed", market_id=market.market_id, yes_price=yes_price)
+                        else:
+                            logger.info("market_price_still_none", market_id=market.market_id)
                 except Exception as e:
                     logger.warning("market_refresh_failed", market_id=market.market_id, error=str(e))
 
@@ -501,6 +512,11 @@ class TradingBot:
                             bids=[{"price": bid, "size": 10}],
                             asks=[{"price": ask, "size": 10}],
                         )
+                        seeded_count += 1
+                    else:
+                        no_price_count += 1
+
+        logger.info("setup_instruments_complete", total=len(instrument_ids), seeded=seeded_count, no_price=no_price_count)
 
         return instrument_ids
 
@@ -540,7 +556,7 @@ class TradingBot:
                                 book_data = await self._adapter.market_data.get_orderbook(iid)
                                 bids = book_data.get("bids", [])
                                 asks = book_data.get("asks", [])
-                                if bids or asks:
+                                if bids and asks:
                                     market = self._instrument_to_market[iid]
                                     self._orderbook.apply_snapshot(
                                         market_id=market.market_id,
@@ -604,7 +620,8 @@ class TradingBot:
             asks = asset.get("asks", [])
 
             if asset.get("type") == "snapshot" or len(bids) > 5:
-                self._orderbook.apply_snapshot(market_id=market.market_id, instrument_id=iid, bids=bids, asks=asks)
+                if bids and asks:
+                    self._orderbook.apply_snapshot(market_id=market.market_id, instrument_id=iid, bids=bids, asks=asks)
             else:
                 self._orderbook.apply_delta(instrument_id=iid, bid_updates=bids, ask_updates=asks)
 
