@@ -134,6 +134,19 @@ export interface ValidationResult {
   warnings: string[];
 }
 
+export interface ServiceStats {
+  name: string;
+  label: string;
+  type: string;
+  status: string;
+  enabled: boolean;
+  api_calls: number;
+  errors: number;
+  estimated_cost: number;
+  last_call_at: string | null;
+  interval_seconds: number | null;
+}
+
 export interface LogEntry {
   timestamp: string;
   level: string;

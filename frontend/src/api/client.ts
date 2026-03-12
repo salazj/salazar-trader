@@ -8,6 +8,7 @@ import type {
   Portfolio,
   RiskState,
   RunConfig,
+  ServiceStats,
   StrategyInfo,
   ValidationResult,
 } from "./types";
@@ -81,6 +82,13 @@ export const api = {
 
   getLogs: (limit = 200, level = "info") =>
     request<LogEntry[]>(`/api/logs?limit=${limit}&level=${level}`),
+
+  getServices: () => request<ServiceStats[]>("/api/bot/services"),
+  updateService: (name: string, config: { enabled?: boolean; interval_seconds?: number }) =>
+    request<{ name: string; enabled: boolean }>("/api/bot/services", {
+      method: "POST",
+      body: JSON.stringify({ name, ...config }),
+    }),
 
   getExchanges: () => request<ExchangeInfo[]>("/api/exchanges"),
   getStrategies: () => request<StrategyInfo[]>("/api/strategies"),

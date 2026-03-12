@@ -175,6 +175,102 @@ class TradingBot:
         self._active_markets: list[Market] = []
         self._instrument_to_market: dict[str, Market] = {}
 
+        # Service stats & runtime toggles
+        self._llm_interval_seconds: float = float(self._settings.llm_analysis_interval)
+        self._claude_interval_seconds: float = float(self._settings.claude_analysis_interval)
+        self._provider_enabled: dict[str, bool] = {}
+        self._init_service_registry()
+
+    def _init_service_registry(self) -> None:
+        """Build the initial provider-enabled map based on settings."""
+        self._provider_enabled["gpt4o"] = self._llm_analyzer is not None
+        self._provider_enabled["claude"] = self._claude_analyzer is not None
+
+        provider_list_str = self._settings.nlp_providers.strip()
+        if provider_list_str:
+            names = [n.strip().lower() for n in provider_list_str.split(",") if n.strip()]
+        else:
+            names = [self._settings.nlp_provider.lower()]
+        for n in ["newsapi", "rss", "google_news", "finnhub"]:
+            self._provider_enabled[n] = n in names
+
+    def get_service_stats(self) -> list[dict]:
+        """Return current stats for all services."""
+        services: list[dict] = []
+
+        gpt_stats = self._llm_analyzer.get_stats() if self._llm_analyzer else {}
+        services.append({
+            "name": "gpt4o",
+            "label": "GPT-4o",
+            "type": "llm",
+            "status": "active" if self._llm_analyzer and self._provider_enabled.get("gpt4o") else (
+                "disabled" if self._llm_analyzer else "not_configured"
+            ),
+            "enabled": self._provider_enabled.get("gpt4o", False),
+            "api_calls": gpt_stats.get("api_calls", 0),
+            "errors": gpt_stats.get("errors", 0),
+            "estimated_cost": gpt_stats.get("estimated_cost", 0.0),
+            "last_call_at": gpt_stats.get("last_call_at"),
+            "interval_seconds": int(self._llm_interval_seconds),
+        })
+
+        claude_stats = self._claude_analyzer.get_stats() if self._claude_analyzer else {}
+        services.append({
+            "name": "claude",
+            "label": "Claude",
+            "type": "llm",
+            "status": "active" if self._claude_analyzer and self._provider_enabled.get("claude") else (
+                "disabled" if self._claude_analyzer else "not_configured"
+            ),
+            "enabled": self._provider_enabled.get("claude", False),
+            "api_calls": claude_stats.get("api_calls", 0),
+            "errors": claude_stats.get("errors", 0),
+            "estimated_cost": claude_stats.get("estimated_cost", 0.0),
+            "last_call_at": claude_stats.get("last_call_at"),
+            "interval_seconds": int(self._claude_interval_seconds),
+        })
+
+        for provider_name, label in [
+            ("newsapi", "NewsAPI"),
+            ("rss", "RSS Feeds"),
+            ("google_news", "Google News"),
+            ("finnhub", "Finnhub"),
+        ]:
+            services.append({
+                "name": provider_name,
+                "label": label,
+                "type": "news",
+                "status": "active" if self._provider_enabled.get(provider_name) else "disabled",
+                "enabled": self._provider_enabled.get(provider_name, False),
+                "api_calls": 0,
+                "errors": 0,
+                "estimated_cost": 0.0,
+                "last_call_at": None,
+                "interval_seconds": None,
+            })
+
+        return services
+
+    def update_service_config(self, name: str, enabled: bool | None = None, interval_seconds: int | None = None) -> dict:
+        """Toggle a provider or update an LLM interval at runtime."""
+        if name not in self._provider_enabled:
+            raise ValueError(f"Unknown service: {name}")
+
+        if enabled is not None:
+            self._provider_enabled[name] = enabled
+            logger.info("service_toggled", name=name, enabled=enabled)
+
+        if interval_seconds is not None:
+            clamped = max(60, min(86400, interval_seconds))
+            if name == "gpt4o":
+                self._llm_interval_seconds = float(clamped)
+                logger.info("llm_interval_updated", name=name, interval=clamped)
+            elif name == "claude":
+                self._claude_interval_seconds = float(clamped)
+                logger.info("llm_interval_updated", name=name, interval=clamped)
+
+        return {"name": name, "enabled": self._provider_enabled.get(name, False)}
+
     def _init_equities(self) -> None:
         """Set up all equities-specific components."""
         from app.brokers import build_broker_adapter
@@ -650,14 +746,26 @@ class TradingBot:
     async def _llm_analysis_loop(self) -> None:
         """Periodically ask GPT and Claude to evaluate active markets.
 
-        Both models analyze the same markets in parallel.  For each market,
-        whichever model returns higher confidence wins.
+        Both models analyze independently on their own schedules.
+        For each market, whichever model returns higher confidence wins.
         """
         await asyncio.sleep(30)
+        import time as _time
+        gpt_last_run = 0.0
+        claude_last_run = 0.0
+
         while self._running:
             try:
                 if not self._active_markets:
-                    await asyncio.sleep(180)
+                    await asyncio.sleep(30)
+                    continue
+
+                now = _time.monotonic()
+                gpt_due = (now - gpt_last_run) >= self._llm_interval_seconds
+                claude_due = (now - claude_last_run) >= self._claude_interval_seconds
+
+                if not gpt_due and not claude_due:
+                    await asyncio.sleep(10)
                     continue
 
                 news_headlines: list[str] = []
@@ -667,7 +775,7 @@ class TradingBot:
 
                 coros = []
                 labels: list[str] = []
-                if self._llm_analyzer:
+                if self._llm_analyzer and gpt_due and self._provider_enabled.get("gpt4o"):
                     coros.append(
                         self._llm_analyzer.analyze_markets(
                             self._active_markets,
@@ -675,7 +783,8 @@ class TradingBot:
                         )
                     )
                     labels.append("gpt")
-                if self._claude_analyzer:
+                    gpt_last_run = now
+                if self._claude_analyzer and claude_due and self._provider_enabled.get("claude"):
                     coros.append(
                         self._claude_analyzer.analyze_markets(
                             self._active_markets,
@@ -683,9 +792,10 @@ class TradingBot:
                         )
                     )
                     labels.append("claude")
+                    claude_last_run = now
 
                 if not coros:
-                    await asyncio.sleep(180)
+                    await asyncio.sleep(10)
                     continue
 
                 results = await asyncio.gather(*coros, return_exceptions=True)
@@ -721,7 +831,7 @@ class TradingBot:
                 break
             except Exception:
                 logger.exception("llm_analysis_loop_error")
-            await asyncio.sleep(180)
+            await asyncio.sleep(10)
 
     async def _persist_positions(self) -> None:
         try:

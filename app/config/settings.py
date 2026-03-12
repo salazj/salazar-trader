@@ -135,6 +135,10 @@ class Settings(BaseSettings):
     claude_api_key: str = ""
     claude_model_name: str = "claude-sonnet-4-6"
 
+    # --- LLM analysis intervals (seconds) ---
+    llm_analysis_interval: int = Field(default=180, ge=60)
+    claude_analysis_interval: int = Field(default=180, ge=60)
+
     # --- Level 2 ML ---
     # "logistic_regression", "gradient_boosting", "random_forest"
     ml_model_name: str = "gradient_boosting"

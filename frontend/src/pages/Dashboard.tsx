@@ -9,6 +9,7 @@ import { useBotStatus } from "@/hooks/useBotStatus";
 import { usePortfolio } from "@/hooks/usePortfolio";
 import { api } from "@/api/client";
 import { formatUSD } from "@/lib/utils";
+import type { ServiceStats } from "@/api/types";
 import {
   Activity,
   TrendingUp,
@@ -23,13 +24,170 @@ import {
   AlertCircle,
   Wallet,
   Loader2,
+  Brain,
+  Newspaper,
+  Rss,
+  Globe,
+  BarChart2,
+  Power,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useRef, useCallback, useMemo } from "react";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  ReferenceLine,
+} from "recharts";
+import { usePnLChart } from "@/hooks/usePnLChart";
+import type { PnLDataPoint } from "@/hooks/usePnLChart";
+
+const INTERVAL_STOPS = [
+  { seconds: 60, label: "1m" },
+  { seconds: 120, label: "2m" },
+  { seconds: 300, label: "5m" },
+  { seconds: 600, label: "10m" },
+  { seconds: 900, label: "15m" },
+  { seconds: 1800, label: "30m" },
+  { seconds: 3600, label: "1h" },
+  { seconds: 7200, label: "2h" },
+  { seconds: 10800, label: "3h" },
+  { seconds: 21600, label: "6h" },
+  { seconds: 43200, label: "12h" },
+  { seconds: 86400, label: "24h" },
+];
+
+function secondsToStopIndex(seconds: number): number {
+  let closest = 0;
+  let minDiff = Infinity;
+  for (let i = 0; i < INTERVAL_STOPS.length; i++) {
+    const diff = Math.abs(INTERVAL_STOPS[i].seconds - seconds);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = i;
+    }
+  }
+  return closest;
+}
+
+function formatInterval(seconds: number): string {
+  if (seconds < 120) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(seconds % 3600 === 0 ? 0 : 1)}h`;
+  return "24h";
+}
+
+const SERVICE_ICONS: Record<string, React.ReactNode> = {
+  gpt4o: <Brain className="h-4 w-4 text-emerald-400" />,
+  claude: <Brain className="h-4 w-4 text-violet-400" />,
+  newsapi: <Newspaper className="h-4 w-4 text-sky-400" />,
+  rss: <Rss className="h-4 w-4 text-orange-400" />,
+  google_news: <Globe className="h-4 w-4 text-blue-400" />,
+  finnhub: <BarChart2 className="h-4 w-4 text-amber-400" />,
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  active: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
+  disabled: "bg-zinc-500/20 text-zinc-400 border-zinc-500/30",
+  error: "bg-red-500/20 text-red-400 border-red-500/30",
+  not_configured: "bg-zinc-800/50 text-zinc-500 border-zinc-700/30",
+};
+
+function FrequencySlider({
+  service,
+  onUpdate,
+}: {
+  service: ServiceStats;
+  onUpdate: (name: string, interval: number) => void;
+}) {
+  const currentSeconds = service.interval_seconds ?? 180;
+  const [sliderIdx, setSliderIdx] = useState(secondsToStopIndex(currentSeconds));
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const idx = parseInt(e.target.value, 10);
+      setSliderIdx(idx);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        onUpdate(service.name, INTERVAL_STOPS[idx].seconds);
+      }, 600);
+    },
+    [service.name, onUpdate],
+  );
+
+  const displaySeconds = INTERVAL_STOPS[sliderIdx].seconds;
+
+  return (
+    <div className="mt-2 px-1">
+      <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1.5">
+        <span>Analysis frequency</span>
+        <span className="font-medium text-foreground">{formatInterval(displaySeconds)}</span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={INTERVAL_STOPS.length - 1}
+        step={1}
+        value={sliderIdx}
+        onChange={handleChange}
+        className="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-secondary
+          [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3.5
+          [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:rounded-full
+          [&::-webkit-slider-thumb]:bg-primary [&::-webkit-slider-thumb]:border-2
+          [&::-webkit-slider-thumb]:border-background [&::-webkit-slider-thumb]:shadow-sm
+          [&::-moz-range-thumb]:h-3.5 [&::-moz-range-thumb]:w-3.5
+          [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-primary
+          [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-background"
+      />
+      <div className="flex justify-between text-[9px] text-muted-foreground/60 mt-0.5">
+        <span>1m</span>
+        <span>1h</span>
+        <span>24h</span>
+      </div>
+    </div>
+  );
+}
+
+function PnLTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: PnLDataPoint }> }) {
+  if (!active || !payload || payload.length === 0) return null;
+  const d = payload[0].payload;
+  const positive = d.pnl >= 0;
+  return (
+    <div className="rounded-lg border bg-popover/95 backdrop-blur-sm px-3 py-2.5 shadow-xl text-xs space-y-1.5">
+      <p className="font-medium text-muted-foreground">{d.time}</p>
+      <div className="flex items-center justify-between gap-6">
+        <span className="text-muted-foreground">P&L</span>
+        <span className={`font-bold tabular-nums ${positive ? "text-emerald-400" : "text-red-400"}`}>
+          {positive ? "+" : ""}{formatUSD(d.pnl)}
+        </span>
+      </div>
+      <div className="flex items-center justify-between gap-6">
+        <span className="text-muted-foreground">Cash</span>
+        <span className="font-medium tabular-nums">{formatUSD(d.cash)}</span>
+      </div>
+      <div className="flex items-center justify-between gap-6">
+        <span className="text-muted-foreground">Exposure</span>
+        <span className="font-medium tabular-nums">{formatUSD(d.exposure)}</span>
+      </div>
+      <div className="flex items-center justify-between gap-6">
+        <span className="text-muted-foreground">Unrealized</span>
+        <span className={`font-medium tabular-nums ${d.unrealized >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+          {formatUSD(d.unrealized)}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { botStatus, riskState, connected } = useBotStatus();
+  const { botStatus, riskState, services, connected } = useBotStatus();
   const { portfolio, recentOrders, connected: portfolioConnected, loaded: portfolioLoaded } = usePortfolio();
+  const pnlData = usePnLChart();
   const { addToast } = useToast();
   const [stopping, setStopping] = useState(false);
 
@@ -45,6 +203,25 @@ export default function Dashboard() {
     }
   };
 
+  const handleToggleService = async (name: string, enabled: boolean) => {
+    try {
+      await api.updateService(name, { enabled });
+    } catch (e: unknown) {
+      addToast({ title: "Failed to update service", description: (e as Error).message, variant: "destructive" });
+    }
+  };
+
+  const handleIntervalUpdate = useCallback(
+    async (name: string, intervalSeconds: number) => {
+      try {
+        await api.updateService(name, { interval_seconds: intervalSeconds });
+      } catch (e: unknown) {
+        addToast({ title: "Failed to update interval", description: (e as Error).message, variant: "destructive" });
+      }
+    },
+    [addToast],
+  );
+
   const uptimeStr =
     botStatus.uptime_seconds > 0
       ? `${Math.floor(botStatus.uptime_seconds / 3600)}h ${Math.floor((botStatus.uptime_seconds % 3600) / 60)}m`
@@ -54,6 +231,21 @@ export default function Dashboard() {
   const pnlPositive = portfolio.daily_pnl >= 0;
   const lossRatio = riskState.max_daily_loss > 0 ? Math.abs(riskState.daily_loss) / riskState.max_daily_loss : 0;
   const dataReady = connected && (portfolioConnected || portfolioLoaded);
+
+  const chartDomain = useMemo(() => {
+    if (pnlData.length === 0) return { min: -1, max: 1 };
+    let min = Infinity;
+    let max = -Infinity;
+    for (const d of pnlData) {
+      if (d.pnl < min) min = d.pnl;
+      if (d.pnl > max) max = d.pnl;
+    }
+    const pad = Math.max(Math.abs(max - min) * 0.15, 0.5);
+    return { min: min - pad, max: max + pad };
+  }, [pnlData]);
+
+  const latestPnl = pnlData.length > 0 ? pnlData[pnlData.length - 1].pnl : 0;
+  const chartPositive = latestPnl >= 0;
 
   return (
     <div className="space-y-6">
@@ -196,6 +388,174 @@ export default function Dashboard() {
             </CardContent>
           </Card>
         </div>
+      )}
+
+      {/* Real-time P&L Chart */}
+      <Card className="relative overflow-hidden">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-sm font-medium flex items-center gap-2">
+                {chartPositive ? (
+                  <TrendingUp className="h-4 w-4 text-emerald-400" />
+                ) : (
+                  <TrendingDown className="h-4 w-4 text-red-400" />
+                )}
+                Profit & Loss
+              </CardTitle>
+              <CardDescription>
+                {pnlData.length > 0
+                  ? `Live session — ${pnlData.length} data points`
+                  : "Waiting for data..."}
+              </CardDescription>
+            </div>
+            {pnlData.length > 0 && (
+              <div className={`text-xl font-bold tabular-nums ${chartPositive ? "text-emerald-400" : "text-red-400"}`}>
+                {latestPnl >= 0 ? "+" : ""}{formatUSD(latestPnl)}
+              </div>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="pb-4">
+          {pnlData.length < 2 ? (
+            <div className="flex flex-col items-center justify-center h-[260px] text-muted-foreground">
+              <Activity className="h-8 w-8 mb-2 opacity-30 animate-pulse" />
+              <p className="text-sm">Collecting data points...</p>
+              <p className="text-xs mt-1">Chart will appear once the bot generates P&L data</p>
+            </div>
+          ) : (
+            <div className="h-[280px] -mx-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={pnlData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="pnlGradientGreen" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#10b981" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#10b981" stopOpacity={0.0} />
+                    </linearGradient>
+                    <linearGradient id="pnlGradientRed" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#ef4444" stopOpacity={0.0} />
+                      <stop offset="100%" stopColor="#ef4444" stopOpacity={0.4} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke="hsl(var(--border))"
+                    opacity={0.3}
+                    vertical={false}
+                  />
+                  <XAxis
+                    dataKey="time"
+                    tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+                    tickLine={false}
+                    axisLine={false}
+                    interval="preserveStartEnd"
+                    minTickGap={60}
+                  />
+                  <YAxis
+                    domain={[chartDomain.min, chartDomain.max]}
+                    tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={(v: number) => `$${v.toFixed(2)}`}
+                    width={58}
+                  />
+                  <Tooltip
+                    content={<PnLTooltip />}
+                    cursor={{
+                      stroke: "hsl(var(--muted-foreground))",
+                      strokeWidth: 1,
+                      strokeDasharray: "4 4",
+                    }}
+                  />
+                  <ReferenceLine
+                    y={0}
+                    stroke="hsl(var(--muted-foreground))"
+                    strokeWidth={1}
+                    strokeOpacity={0.5}
+                    strokeDasharray="6 3"
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="pnl"
+                    stroke={chartPositive ? "#10b981" : "#ef4444"}
+                    strokeWidth={2}
+                    fill={chartPositive ? "url(#pnlGradientGreen)" : "url(#pnlGradientRed)"}
+                    animationDuration={800}
+                    animationEasing="ease-out"
+                    dot={false}
+                    activeDot={{
+                      r: 4,
+                      stroke: chartPositive ? "#10b981" : "#ef4444",
+                      strokeWidth: 2,
+                      fill: "hsl(var(--background))",
+                    }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+        {pnlData.length >= 2 && (
+          <div className={`absolute bottom-0 left-0 right-0 h-[2px] ${
+            chartPositive
+              ? "bg-gradient-to-r from-emerald-500/0 via-emerald-500/60 to-emerald-500/0"
+              : "bg-gradient-to-r from-red-500/0 via-red-500/60 to-red-500/0"
+          }`} />
+        )}
+      </Card>
+
+      {/* AI & Services */}
+      {botStatus.running && services.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium flex items-center gap-2">
+              <Brain className="h-4 w-4" /> AI & Services
+            </CardTitle>
+            <CardDescription>Real-time provider status, usage, and controls</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {services.map((svc) => (
+              <div key={svc.name} className="rounded-lg border border-border/50 p-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    {SERVICE_ICONS[svc.name] ?? <Power className="h-4 w-4 text-muted-foreground" />}
+                    <span className="text-sm font-medium">{svc.label}</span>
+                    <Badge className={`text-[10px] px-1.5 py-0 ${STATUS_COLORS[svc.status] ?? STATUS_COLORS.not_configured}`}>
+                      {svc.status.replace("_", " ")}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {svc.type === "llm" && svc.api_calls > 0 && (
+                      <span className="text-[11px] text-muted-foreground tabular-nums">
+                        {svc.api_calls} calls (~${svc.estimated_cost.toFixed(2)})
+                      </span>
+                    )}
+                    {svc.status !== "not_configured" && (
+                      <button
+                        onClick={() => handleToggleService(svc.name, !svc.enabled)}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                          svc.enabled ? "bg-emerald-500" : "bg-zinc-600"
+                        }`}
+                        role="switch"
+                        aria-checked={svc.enabled}
+                        aria-label={`Toggle ${svc.label}`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm ring-0 transition-transform duration-200 ${
+                            svc.enabled ? "translate-x-4" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {svc.type === "llm" && svc.status !== "not_configured" && svc.enabled && (
+                  <FrequencySlider service={svc} onUpdate={handleIntervalUpdate} />
+                )}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
       )}
 
       {/* Exposure + positions */}

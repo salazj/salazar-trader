@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { useWebSocket } from "./useWebSocket";
-import type { BotStatus, RiskState } from "@/api/types";
+import type { BotStatus, RiskState, ServiceStats } from "@/api/types";
 
 const defaultStatus: BotStatus = {
   running: false, status: "stopped", session_id: "", asset_class: "", exchange: "",
@@ -17,16 +17,18 @@ const defaultRisk: RiskState = {
 export function useBotStatus() {
   const [botStatus, setBotStatus] = useState<BotStatus>(defaultStatus);
   const [riskState, setRiskState] = useState<RiskState>(defaultRisk);
+  const [services, setServices] = useState<ServiceStats[]>([]);
 
   const onMessage = useCallback((data: unknown) => {
-    const msg = data as { type: string; bot?: BotStatus; risk?: RiskState };
+    const msg = data as { type: string; bot?: BotStatus; risk?: RiskState; services?: ServiceStats[] };
     if (msg.type === "status") {
       if (msg.bot) setBotStatus(msg.bot);
       if (msg.risk) setRiskState(msg.risk);
+      if (msg.services) setServices(msg.services);
     }
   }, []);
 
   const { connected } = useWebSocket({ url: "/ws/status", onMessage });
 
-  return { botStatus, riskState, connected };
+  return { botStatus, riskState, services, connected };
 }

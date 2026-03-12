@@ -9,6 +9,11 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
+echo "==> Cleaning up old containers (if any)..."
+docker stop salazar-backend salazar-frontend 2>/dev/null || true
+docker rm   salazar-backend salazar-frontend 2>/dev/null || true
+docker network rm salazar-net 2>/dev/null || true
+
 echo "==> Building images from source..."
 docker compose -f docker-compose.yml -f docker-compose.build.yml build
 

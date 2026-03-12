@@ -308,6 +308,21 @@ class BotManager:
             raise RuntimeError("Bot is not running")
         self._bot._risk_manager.trip_circuit_breaker(reason)
 
+    # ── Services ───────────────────────────────────────────────────────
+
+    def get_service_stats(self) -> list[dict]:
+        if self._bot is None:
+            return []
+        try:
+            return self._bot.get_service_stats()
+        except Exception:
+            return []
+
+    def update_service_config(self, name: str, enabled: bool | None = None, interval_seconds: int | None = None) -> dict:
+        if self._bot is None:
+            raise RuntimeError("Bot is not running")
+        return self._bot.update_service_config(name, enabled=enabled, interval_seconds=interval_seconds)
+
     # ── Config ─────────────────────────────────────────────────────────
 
     def get_run_config(self) -> RunConfig | None:

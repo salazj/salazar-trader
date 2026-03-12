@@ -184,3 +184,22 @@ class HealthResponse(BaseModel):
     uptime_seconds: float = 0.0
     log_subscribers: int = 0
     timestamp: str = ""
+
+
+class ServiceConfigUpdate(BaseModel):
+    name: str
+    enabled: bool | None = None
+    interval_seconds: int | None = None
+
+
+class ServiceStatsItem(BaseModel):
+    name: str = ""
+    label: str = ""
+    type: str = ""
+    status: str = "not_configured"
+    enabled: bool = False
+    api_calls: int = 0
+    errors: int = 0
+    estimated_cost: float = 0.0
+    last_call_at: str | None = None
+    interval_seconds: int | None = None

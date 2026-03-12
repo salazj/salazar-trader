@@ -103,6 +103,8 @@ def _build_market_prompt(
 class LLMMarketAnalyzer:
     """Uses GPT to evaluate whether prediction markets are mispriced."""
 
+    COST_PER_CALL = 0.005
+
     def __init__(
         self,
         base_url: str,
@@ -115,6 +117,9 @@ class LLMMarketAnalyzer:
         self._model = model
         self._min_edge = min_edge
         self._max_markets = max_markets_per_cycle
+        self.api_calls: int = 0
+        self.errors: int = 0
+        self.last_call_at: str | None = None
 
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key:
@@ -131,6 +136,14 @@ class LLMMarketAnalyzer:
             min_edge=min_edge,
             max_markets=max_markets_per_cycle,
         )
+
+    def get_stats(self) -> dict[str, Any]:
+        return {
+            "api_calls": self.api_calls,
+            "errors": self.errors,
+            "estimated_cost": round(self.api_calls * self.COST_PER_CALL, 4),
+            "last_call_at": self.last_call_at,
+        }
 
     async def analyze_markets(
         self,
@@ -215,6 +228,8 @@ class LLMMarketAnalyzer:
         }
 
         try:
+            self.api_calls += 1
+            self.last_call_at = utc_now().isoformat()
             resp = await self._client.post("/chat/completions", json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -236,9 +251,11 @@ class LLMMarketAnalyzer:
             return analysis
 
         except httpx.TimeoutException:
+            self.errors += 1
             logger.warning("llm_analysis_timeout", market_id=market.market_id)
             return None
         except httpx.HTTPStatusError as e:
+            self.errors += 1
             logger.warning(
                 "llm_analysis_http_error",
                 market_id=market.market_id,
@@ -308,6 +325,8 @@ class ClaudeMarketAnalyzer:
     targets the Anthropic Messages API instead of OpenAI chat completions.
     """
 
+    COST_PER_CALL = 0.003
+
     def __init__(
         self,
         api_key: str,
@@ -319,6 +338,9 @@ class ClaudeMarketAnalyzer:
         self._model = model
         self._min_edge = min_edge
         self._max_markets = max_markets_per_cycle
+        self.api_calls: int = 0
+        self.errors: int = 0
+        self.last_call_at: str | None = None
 
         self._client = httpx.AsyncClient(
             base_url="https://api.anthropic.com",
@@ -335,6 +357,14 @@ class ClaudeMarketAnalyzer:
             min_edge=min_edge,
             max_markets=max_markets_per_cycle,
         )
+
+    def get_stats(self) -> dict[str, Any]:
+        return {
+            "api_calls": self.api_calls,
+            "errors": self.errors,
+            "estimated_cost": round(self.api_calls * self.COST_PER_CALL, 4),
+            "last_call_at": self.last_call_at,
+        }
 
     async def analyze_markets(
         self,
@@ -413,6 +443,8 @@ class ClaudeMarketAnalyzer:
         }
 
         try:
+            self.api_calls += 1
+            self.last_call_at = utc_now().isoformat()
             resp = await self._client.post("/v1/messages", json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -441,9 +473,11 @@ class ClaudeMarketAnalyzer:
             return analysis
 
         except httpx.TimeoutException:
+            self.errors += 1
             logger.warning("claude_analysis_timeout", market_id=market.market_id)
             return None
         except httpx.HTTPStatusError as e:
+            self.errors += 1
             body = ""
             try:
                 body = e.response.text[:300]
