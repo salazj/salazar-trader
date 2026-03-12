@@ -158,13 +158,17 @@ def normalize_orderbook(ticker: str, raw: dict[str, Any]) -> OrderbookSnapshot:
 
     Kalshi API v2 uses ``{"yes_dollars": [...], "no_dollars": [...]}`` (dollar format)
     or legacy ``{"yes": [...], "no": [...]}`` (cents format).
+
+    NO side prices are converted to YES perspective: ask_price = 1.0 - no_price.
     """
     is_dollars = "yes_dollars" in raw or "no_dollars" in raw
     yes_key = "yes_dollars" if is_dollars else "yes"
     no_key = "no_dollars" if is_dollars else "no"
 
     bids = _parse_book_levels(raw.get(yes_key, raw.get("bids", [])), descending=True, is_dollars=is_dollars)
-    asks = _parse_book_levels(raw.get(no_key, raw.get("asks", [])), descending=False, is_dollars=is_dollars)
+    raw_no_levels = _parse_book_levels(raw.get(no_key, raw.get("asks", [])), descending=False, is_dollars=is_dollars)
+    asks = [PriceLevel(price=1.0 - lvl.price, size=lvl.size) for lvl in raw_no_levels if lvl.price < 1.0]
+    asks.sort(key=lambda l: l.price)
 
     return OrderbookSnapshot(
         market_id=ticker,
