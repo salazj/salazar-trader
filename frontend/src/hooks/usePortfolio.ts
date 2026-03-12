@@ -11,6 +11,7 @@ const defaultPortfolio: Portfolio = {
 export function usePortfolio() {
   const [portfolio, setPortfolio] = useState<Portfolio>(defaultPortfolio);
   const [recentOrders, setRecentOrders] = useState<OrderItem[]>([]);
+  const [exchangeOrders, setExchangeOrders] = useState<OrderItem[]>([]);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -27,15 +28,21 @@ export function usePortfolio() {
   }, []);
 
   const onMessage = useCallback((data: unknown) => {
-    const msg = data as { type: string; portfolio?: Portfolio; recent_orders?: OrderItem[] };
+    const msg = data as {
+      type: string;
+      portfolio?: Portfolio;
+      recent_orders?: OrderItem[];
+      exchange_orders?: OrderItem[];
+    };
     if (msg.type === "portfolio") {
       if (msg.portfolio) setPortfolio(msg.portfolio);
       if (msg.recent_orders) setRecentOrders(msg.recent_orders);
+      if (msg.exchange_orders) setExchangeOrders(msg.exchange_orders);
       setLoaded(true);
     }
   }, []);
 
   const { connected } = useWebSocket({ url: "/ws/portfolio", onMessage });
 
-  return { portfolio, recentOrders, connected, loaded };
+  return { portfolio, recentOrders, exchangeOrders, connected, loaded };
 }

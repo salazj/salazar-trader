@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     min_spread_threshold: float = Field(default=0.01, ge=0, le=1)
     max_spread_threshold: float = Field(default=0.15, ge=0, le=1)
 
+    # --- Stop-Loss ---
+    stop_loss_enabled: bool = True
+    stop_loss_pct: float = Field(default=0.50, ge=0.0, le=1.0)
+    stop_loss_check_interval: int = Field(default=30, ge=10)
+
     # --- Strategy ---
     strategy: str = "passive_market_maker"
     default_order_size: float = Field(default=1.0, ge=0.01)

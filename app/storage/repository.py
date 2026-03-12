@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS fills (
     filled_at TEXT NOT NULL
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_order_id ON fills (order_id);
+
 CREATE TABLE IF NOT EXISTS positions (
     token_id TEXT PRIMARY KEY,
     market_id TEXT NOT NULL,
@@ -400,11 +402,14 @@ class Repository:
 
     # ── Fills ──────────────────────────────────────────────────────────
 
-    async def save_fill(self, order_id: str, price: float, size: float, pnl: float) -> None:
+    async def save_fill(
+        self, order_id: str, price: float, size: float, pnl: float, timestamp: str | None = None,
+    ) -> None:
         assert self._db is not None
+        filled_at = timestamp if timestamp else _to_iso(datetime.utcnow())
         await self._db.execute(
-            "INSERT INTO fills (order_id, price, size, pnl, filled_at) VALUES (?, ?, ?, ?, ?)",
-            (order_id, price, size, pnl, _to_iso(datetime.utcnow())),
+            "INSERT OR IGNORE INTO fills (order_id, price, size, pnl, filled_at) VALUES (?, ?, ?, ?, ?)",
+            (order_id, price, size, pnl, filled_at),
         )
         await self._db.commit()
 

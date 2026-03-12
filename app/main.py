@@ -18,7 +18,8 @@ import click
 
 from app.config.settings import Settings, get_settings
 from app.data.features import FeatureEngine
-from app.data.models import Market, MarketFeatures, Side, Signal, Trade, TradingMode
+from app.data.models import Market, MarketFeatures, Order, Side, Signal, Trade, TradingMode
+from app.utils.helpers import generate_order_id
 from app.data.orderbook import OrderbookManager
 from app.decision.engine import DecisionEngine, signal_to_normalized
 from app.decision.ensemble import DecisionMode, EnsembleConfig
@@ -480,6 +481,8 @@ class TradingBot:
         ]
         if self._llm_analyzer is not None or self._claude_analyzer is not None:
             tasks.append(self._llm_analysis_loop())
+        if self._settings.stop_loss_enabled:
+            tasks.append(self._stop_loss_monitor_loop())
         await asyncio.gather(*tasks)
 
     async def stop(self) -> None:
@@ -833,6 +836,73 @@ class TradingBot:
                 logger.exception("llm_analysis_loop_error")
             await asyncio.sleep(10)
 
+    async def _stop_loss_monitor_loop(self) -> None:
+        """Monitor open positions and auto-exit those exceeding the stop-loss threshold.
+
+        For each position, if the unrealized loss exceeds stop_loss_pct of the
+        entry cost, the bot sells the position at market by placing a limit order
+        at a deep discount to ensure a fast fill.
+        """
+        interval = self._settings.stop_loss_check_interval
+        threshold = self._settings.stop_loss_pct
+        await asyncio.sleep(60)
+
+        while self._running:
+            try:
+                positions = self._portfolio.positions
+                for pos in positions:
+                    if pos.size <= 0:
+                        continue
+                    entry_cost = pos.avg_entry_price * pos.size
+                    if entry_cost <= 0:
+                        continue
+
+                    loss_pct = -pos.unrealized_pnl / entry_cost if entry_cost > 0 else 0.0
+
+                    if loss_pct >= threshold:
+                        iid = pos.instrument_id or pos.token_id
+                        logger.warning(
+                            "stop_loss_triggered",
+                            instrument_id=iid,
+                            size=pos.size,
+                            entry_price=pos.avg_entry_price,
+                            mark_price=pos.last_mark_price,
+                            unrealized_pnl=pos.unrealized_pnl,
+                            loss_pct=round(loss_pct * 100, 1),
+                            threshold_pct=round(threshold * 100, 1),
+                        )
+
+                        exit_price = max(0.01, pos.last_mark_price * 0.90)
+                        exit_order = Order(
+                            order_id=f"SL-{generate_order_id()}",
+                            instrument_id=iid,
+                            market_id=pos.market_id,
+                            exchange=self._settings.exchange,
+                            side=Side.SELL,
+                            price=round(exit_price, 2),
+                            size=pos.size,
+                        )
+
+                        try:
+                            placed = await self._adapter.execution.place_order(exit_order)
+                            logger.info(
+                                "stop_loss_order_placed",
+                                instrument_id=iid,
+                                order_id=placed.order_id,
+                                price=exit_price,
+                                size=pos.size,
+                                status=placed.status.value,
+                            )
+                        except Exception as e:
+                            logger.error("stop_loss_order_failed", instrument_id=iid, error=str(e))
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("stop_loss_monitor_error")
+
+            await asyncio.sleep(interval)
+
     async def _persist_positions(self) -> None:
         try:
             positions = self._portfolio.positions
@@ -842,22 +912,104 @@ class TradingBot:
             logger.error("position_persist_failed", error=str(e))
 
     async def _recover_positions(self) -> None:
+        """Recover positions — prefer live Kalshi data, fall back to local DB."""
+        from app.data.models import OutcomeSide
+
+        synced_from_exchange = False
         try:
-            rows = await self._repository.load_positions()
-            for row in rows:
-                from app.data.models import OutcomeSide
-                self._portfolio.restore_position(
-                    token_id=row["token_id"],
-                    market_id=row["market_id"],
-                    token_side=OutcomeSide(row["token_side"]),
-                    size=row["size"],
-                    avg_entry_price=row["avg_entry_price"],
-                    realized_pnl=row["realized_pnl"],
-                )
-            if rows:
-                logger.info("positions_recovered", count=len(rows))
+            exchange_positions = await self._adapter.execution.get_open_positions()
+            if exchange_positions:
+                for ep in exchange_positions:
+                    iid = ep.get("instrument_id", ep.get("token_id", ""))
+                    size = float(ep.get("size", 0))
+                    if not iid or size <= 0:
+                        continue
+                    side_str = ep.get("token_side", ep.get("side", "yes")).lower()
+                    token_side = OutcomeSide.NO if side_str == "no" else OutcomeSide.YES
+                    avg_price = float(ep.get("avg_entry_price", ep.get("average_price", 0)))
+                    self._portfolio.restore_position(
+                        token_id=iid,
+                        market_id=ep.get("market_id", iid),
+                        token_side=token_side,
+                        size=size,
+                        avg_entry_price=avg_price,
+                        realized_pnl=float(ep.get("realized_pnl", 0)),
+                    )
+                synced_from_exchange = True
+                logger.info("positions_synced_from_exchange", count=len(exchange_positions))
         except Exception as e:
-            logger.error("position_recovery_failed", error=str(e))
+            logger.warning("exchange_position_sync_failed", error=str(e))
+
+        if not synced_from_exchange:
+            try:
+                rows = await self._repository.load_positions()
+                for row in rows:
+                    self._portfolio.restore_position(
+                        token_id=row["token_id"],
+                        market_id=row["market_id"],
+                        token_side=OutcomeSide(row["token_side"]),
+                        size=row["size"],
+                        avg_entry_price=row["avg_entry_price"],
+                        realized_pnl=row["realized_pnl"],
+                    )
+                if rows:
+                    logger.info("positions_recovered_from_db", count=len(rows))
+            except Exception as e:
+                logger.error("position_recovery_failed", error=str(e))
+
+        await self._sync_exchange_orders()
+
+    async def _sync_exchange_orders(self) -> None:
+        """Import resting orders from Kalshi into the execution engine."""
+        try:
+            exchange_orders = await self._adapter.execution.get_open_orders()
+            imported = 0
+            for eo in exchange_orders:
+                oid = eo.get("order_id", eo.get("exchange_order_id", ""))
+                status_str = eo.get("status", "").upper()
+                if not oid or status_str not in ("RESTING", "PENDING", "ACKNOWLEDGED"):
+                    continue
+                from app.data.models import OrderStatus
+                order = Order(
+                    order_id=oid,
+                    exchange_order_id=oid,
+                    instrument_id=eo.get("instrument_id", eo.get("token_id", "")),
+                    market_id=eo.get("market_id", ""),
+                    exchange=self._settings.exchange,
+                    side=Side.BUY if eo.get("side", "").lower() in ("buy", "yes") else Side.SELL,
+                    price=float(eo.get("price", 0)),
+                    size=float(eo.get("size", eo.get("count", 0))),
+                    status=OrderStatus.ACKNOWLEDGED,
+                )
+                self._execution._order_history.append(order)
+                self._execution._active_orders[oid] = order
+                imported += 1
+            if imported:
+                logger.info("exchange_orders_synced", count=imported)
+        except Exception as e:
+            logger.warning("exchange_order_sync_failed", error=str(e))
+
+        await self._sync_exchange_fills()
+
+    async def _sync_exchange_fills(self) -> None:
+        """Import recent fills from Kalshi to seed the P&L history in the DB."""
+        try:
+            fills = await self._adapter.execution.get_fills(limit=100)
+            saved = 0
+            for f in fills:
+                oid = f.get("order_id", "")
+                price = float(f.get("price", 0))
+                size = float(f.get("size", f.get("count", 0)))
+                pnl = float(f.get("pnl", 0))
+                filled_at = f.get("filled_at", f.get("created_time", ""))
+                if not oid or price <= 0 or size <= 0:
+                    continue
+                await self._repository.save_fill(oid, price, size, pnl, timestamp=filled_at)
+                saved += 1
+            if saved:
+                logger.info("exchange_fills_synced", count=saved)
+        except Exception as e:
+            logger.warning("exchange_fill_sync_failed", error=str(e))
 
     # ── WebSocket Handlers ─────────────────────────────────────────────
 
@@ -955,15 +1107,20 @@ class TradingBot:
             self._execution.update_order_status(order_id, new_status)
 
     async def _reconcile_positions(self) -> None:
+        """Reconcile local positions with the exchange and correct drift."""
+        from app.data.models import OutcomeSide
+
         try:
             exchange_positions = await self._adapter.execution.get_open_positions()
             if not exchange_positions:
                 return
 
-            exchange_map = {
-                p.get("instrument_id", p.get("token_id", "")): p
-                for p in exchange_positions
-            }
+            exchange_map: dict[str, dict] = {}
+            for p in exchange_positions:
+                pid = p.get("instrument_id", p.get("token_id", ""))
+                if pid:
+                    exchange_map[pid] = p
+
             local_positions = self._portfolio.positions
 
             for pos in local_positions:
@@ -976,19 +1133,36 @@ class TradingBot:
                         local_size=pos.size,
                     )
                 elif abs(pos.size - float(ex.get("size", 0))) > 0.01:
+                    new_size = float(ex.get("size", 0))
                     logger.warning(
-                        "position_drift_size_mismatch",
+                        "position_drift_corrected",
                         instrument_id=pid,
                         local_size=pos.size,
-                        exchange_size=ex.get("size"),
+                        exchange_size=new_size,
                     )
+                    pos.size = new_size
 
             for pid, ex in exchange_map.items():
-                logger.warning(
-                    "position_drift_exchange_only",
-                    instrument_id=pid,
-                    exchange_size=ex.get("size"),
+                ex_size = float(ex.get("size", 0))
+                if ex_size <= 0:
+                    continue
+                side_str = ex.get("token_side", ex.get("side", "yes")).lower()
+                token_side = OutcomeSide.NO if side_str == "no" else OutcomeSide.YES
+                avg_price = float(ex.get("avg_entry_price", ex.get("average_price", 0)))
+                self._portfolio.restore_position(
+                    token_id=pid,
+                    market_id=ex.get("market_id", pid),
+                    token_side=token_side,
+                    size=ex_size,
+                    avg_entry_price=avg_price,
+                    realized_pnl=0.0,
                 )
+                logger.info(
+                    "position_drift_added_from_exchange",
+                    instrument_id=pid,
+                    size=ex_size,
+                )
+
         except Exception as e:
             logger.error("reconciliation_error", error=str(e))
 

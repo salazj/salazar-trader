@@ -186,7 +186,7 @@ function PnLTooltip({ active, payload }: { active?: boolean; payload?: Array<{ p
 export default function Dashboard() {
   const navigate = useNavigate();
   const { botStatus, riskState, services, connected } = useBotStatus();
-  const { portfolio, recentOrders, connected: portfolioConnected, loaded: portfolioLoaded } = usePortfolio();
+  const { portfolio, recentOrders, exchangeOrders, connected: portfolioConnected, loaded: portfolioLoaded } = usePortfolio();
   const pnlData = usePnLChart();
   const { addToast } = useToast();
   const [stopping, setStopping] = useState(false);
@@ -704,6 +704,56 @@ export default function Dashboard() {
           )}
         </CardContent>
       </Card>
+
+      {/* Resting Orders (Exchange) */}
+      {exchangeOrders.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <Clock className="h-4 w-4" /> Resting Orders
+                </CardTitle>
+                <CardDescription>{exchangeOrders.length} open on exchange</CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto -mx-6">
+              <table className="w-full text-sm min-w-[480px]">
+                <thead>
+                  <tr className="border-b text-muted-foreground text-xs uppercase tracking-wider">
+                    <th className="text-left py-2.5 px-6">Instrument</th>
+                    <th className="text-left py-2.5 pr-4">Side</th>
+                    <th className="text-right py-2.5 pr-4">Price</th>
+                    <th className="text-right py-2.5 pr-4">Size</th>
+                    <th className="text-left py-2.5 px-6">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {exchangeOrders.map((o, i) => (
+                    <tr key={o.order_id || i} className="border-b border-border/40 hover:bg-accent/20 transition-colors">
+                      <td className="py-2.5 px-6 font-medium">{o.instrument_id}</td>
+                      <td className="py-2.5 pr-4">
+                        <Badge variant={o.side.toLowerCase() === "buy" || o.side.toLowerCase() === "yes" ? "success" : "destructive"} className="text-[10px]">
+                          {o.side}
+                        </Badge>
+                      </td>
+                      <td className="py-2.5 pr-4 text-right tabular-nums">{formatUSD(o.price)}</td>
+                      <td className="py-2.5 pr-4 text-right tabular-nums">{o.size.toFixed(0)}</td>
+                      <td className="py-2.5 px-6">
+                        <Badge variant="secondary" className="text-[10px] bg-amber-500/20 text-amber-400 border-amber-500/30">
+                          {o.status}
+                        </Badge>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

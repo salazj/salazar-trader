@@ -228,6 +228,29 @@ class BotManager:
         except Exception:
             return []
 
+    async def get_exchange_orders(self) -> list[OrderItem]:
+        """Fetch live resting orders directly from the exchange."""
+        if self._bot is None:
+            return []
+        try:
+            raw = await self._bot._adapter.execution.get_open_orders()
+            return [
+                OrderItem(
+                    order_id=o.get("order_id", o.get("exchange_order_id", "")),
+                    instrument_id=o.get("instrument_id", o.get("token_id", "")),
+                    exchange=self._bot._settings.exchange,
+                    side=o.get("side", ""),
+                    price=float(o.get("price", 0)),
+                    size=float(o.get("size", o.get("count", 0))),
+                    filled_size=float(o.get("filled_size", 0)),
+                    status=o.get("status", "resting"),
+                    created_at=o.get("created_at", o.get("created_time", "")),
+                )
+                for o in raw
+            ]
+        except Exception:
+            return []
+
     async def get_fills(self, limit: int = 50) -> list[FillItem]:
         """Retrieve recent fills via the repository. Encapsulates DB access."""
         if self._bot is None:
