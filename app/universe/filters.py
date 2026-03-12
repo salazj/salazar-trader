@@ -122,11 +122,14 @@ class MarketFilter:
     def _check_liquidity(
         self, book: OrderbookSnapshot | None, metadata: dict[str, Any]
     ) -> FilterResult:
-        liquidity = metadata.get("liquidity", 0.0)
+        liquidity = metadata.get("liquidity")
         if book is not None:
             bid_liq = sum(l.size for l in book.bids)
             ask_liq = sum(l.size for l in book.asks)
-            liquidity = max(liquidity, bid_liq + ask_liq)
+            book_liq = bid_liq + ask_liq
+            liquidity = max(liquidity or 0.0, book_liq)
+        if liquidity is None or liquidity == 0:
+            return FilterResult(True)
         if self._config.min_liquidity > 0 and liquidity < self._config.min_liquidity:
             return FilterResult(False, f"insufficient_liquidity:{liquidity:.1f}")
         return FilterResult(True)
@@ -155,6 +158,8 @@ class MarketFilter:
         depth = metadata.get("depth", 0.0)
         if book is not None:
             depth = max(depth, len(book.bids) + len(book.asks))
+        elif depth == 0.0:
+            return FilterResult(True)
         if self._config.min_orderbook_depth > 0 and depth < self._config.min_orderbook_depth:
             return FilterResult(False, f"insufficient_depth:{depth}")
         return FilterResult(True)

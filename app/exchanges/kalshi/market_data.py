@@ -78,8 +78,8 @@ class KalshiMarketDataClient(BaseMarketDataClient):
 
     # ── Markets ───────────────────────────────────────────────────────
 
-    async def get_markets(self, cursor: str = "") -> tuple[list[Market], str]:
-        params: dict[str, Any] = {"limit": 100, "status": "open"}
+    async def get_markets(self, cursor: str = "", limit: int = 1000) -> tuple[list[Market], str]:
+        params: dict[str, Any] = {"limit": limit, "status": "open"}
         if cursor:
             params["cursor"] = cursor
 
@@ -87,21 +87,34 @@ class KalshiMarketDataClient(BaseMarketDataClient):
         next_cursor = data.get("cursor", "")
         raw_markets = data.get("markets", [])
 
-        markets = [normalize_market(m) for m in raw_markets]
+        markets = [normalize_market(m) for m in raw_markets if not _is_parlay(m)]
         logger.info(
             "kalshi_fetched_markets",
             count=len(markets),
+            raw=len(raw_markets),
             next_cursor=next_cursor[:20] if next_cursor else "",
         )
         return markets, next_cursor
 
-    async def get_all_markets(self, max_pages: int = 50) -> list[Market]:
+    async def get_all_markets(self, max_markets: int = 5000) -> list[Market]:
         all_markets: list[Market] = []
         cursor = ""
-        for page_num in range(max_pages):
+        max_raw_pages = 100
+        consecutive_empty = 0
+        for page_num in range(max_raw_pages):
             page, cursor = await self.get_markets(cursor)
             all_markets.extend(page)
             if not cursor:
+                break
+            if len(all_markets) >= max_markets:
+                break
+            if page:
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+            if len(all_markets) >= 500 and consecutive_empty >= 20:
+                logger.info("kalshi_paging_stopped_early", reason="consecutive_empty",
+                            pages=page_num + 1, fetched=len(all_markets))
                 break
             logger.debug("kalshi_paging_markets", page=page_num + 1, fetched=len(all_markets))
 
@@ -122,7 +135,7 @@ class KalshiMarketDataClient(BaseMarketDataClient):
         cat_map: dict[str, str] = {}
         cursor = ""
         try:
-            for _ in range(20):
+            for _ in range(50):
                 params: dict[str, Any] = {"limit": 200, "status": "open"}
                 if cursor:
                     params["cursor"] = cursor
@@ -234,3 +247,12 @@ class KalshiMarketDataClient(BaseMarketDataClient):
         except Exception as e:
             logger.warning("kalshi_search_error", query=query, error=str(e))
             return []
+
+
+_PARLAY_PREFIXES = ("KXMVE", "KXCROSSCATEGORY", "KXPARLAY")
+
+
+def _is_parlay(raw: dict[str, Any]) -> bool:
+    """Return True for synthetic cross-category / parlay combo markets."""
+    ticker = raw.get("ticker", "")
+    return any(ticker.startswith(p) for p in _PARLAY_PREFIXES)
