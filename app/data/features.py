@@ -91,6 +91,8 @@ class FeatureEngine:
         self._trades: deque[Trade] = deque(maxlen=max_trades)
         self._price_history: deque[float] = deque(maxlen=200)
         self._last_update = time.time()
+        self.volume_24h: float = 0.0
+        self.open_interest: float = 0.0
 
     def add_trade(self, trade: Trade) -> None:
         self._trades.append(trade)
@@ -156,5 +158,7 @@ class FeatureEngine:
             momentum_15m=compute_momentum(prices) if len(prices) >= 2 else 0.0,
             trade_count_1m=len(recent_trades),
             last_trade_price=last_trade_price,
+            volume_24h=self.volume_24h,
+            open_interest=self.open_interest,
             seconds_since_last_update=seconds_since,
         )

@@ -33,10 +33,14 @@ from app.monitoring.logger import metrics
 from app.news.ingestion import NewsIngestionService
 from app.nlp.classifier import HybridClassifier, KeywordClassifier
 from app.nlp.pipeline import NlpPipeline, nlp_signal_to_layered
+from app.nlp.market_analyzer import LLMMarketAnalyzer, ClaudeMarketAnalyzer
 from app.nlp.providers.llm_provider import build_llm_classifier
 from app.nlp.providers.mock import MockProvider
 from app.nlp.providers.file_provider import FileProvider
 from app.nlp.providers.newsapi import NewsApiProvider
+from app.nlp.providers.rss import RssProvider
+from app.nlp.providers.google_news import GoogleNewsProvider
+from app.nlp.providers.finnhub import FinnhubProvider
 from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import RiskManager
 from app.storage.repository import Repository
@@ -125,6 +129,38 @@ class TradingBot:
 
         self._news_service.set_market_provider(lambda: self._active_markets)
 
+        # LLM Market Analyzers — GPT and Claude probability assessment
+        self._llm_analyzer: LLMMarketAnalyzer | None = None
+        self._claude_analyzer: ClaudeMarketAnalyzer | None = None
+        self._llm_analysis_signals: list = []
+
+        if self._settings.llm_provider not in ("none", ""):
+            self._llm_analyzer = LLMMarketAnalyzer(
+                base_url=self._settings.llm_base_url,
+                model=self._settings.llm_model_name,
+                api_key=self._settings.llm_api_key,
+                timeout=self._settings.llm_timeout_seconds,
+                min_edge=0.05,
+                max_markets_per_cycle=15,
+            )
+            logger.info(
+                "llm_market_analyzer_enabled",
+                model=self._settings.llm_model_name,
+            )
+
+        if self._settings.claude_api_key:
+            self._claude_analyzer = ClaudeMarketAnalyzer(
+                api_key=self._settings.claude_api_key,
+                model=self._settings.claude_model_name,
+                timeout=self._settings.llm_timeout_seconds,
+                min_edge=0.05,
+                max_markets_per_cycle=15,
+            )
+            logger.info(
+                "claude_market_analyzer_enabled",
+                model=self._settings.claude_model_name,
+            )
+
         # Universe selection (upstream from strategy execution)
         self._universe = UniverseManager(self._settings, self._adapter.market_data)
 
@@ -194,22 +230,42 @@ class TradingBot:
         return NlpPipeline(classifier=classifier)
 
     def _setup_nlp_providers(self) -> None:
-        provider_name = self._settings.nlp_provider.lower()
-        if provider_name == "mock":
-            self._news_service.register_provider(MockProvider())
-        elif provider_name == "file":
-            self._news_service.register_provider(
-                FileProvider(directory=self._settings.news_file_dir)
-            )
-        elif provider_name == "newsapi":
-            self._news_service.register_provider(
-                NewsApiProvider(api_key=self._settings.newsapi_key)
-            )
-        elif provider_name == "none":
-            pass
+        provider_list_str = self._settings.nlp_providers.strip()
+        if provider_list_str:
+            names = [n.strip().lower() for n in provider_list_str.split(",") if n.strip()]
         else:
-            logger.warning("unknown_nlp_provider", name=provider_name)
-            self._news_service.register_provider(MockProvider())
+            names = [self._settings.nlp_provider.lower()]
+
+        registered: list[str] = []
+        for name in names:
+            provider = self._build_provider(name)
+            if provider is not None:
+                if provider.is_available():
+                    self._news_service.register_provider(provider)
+                    registered.append(name)
+                else:
+                    logger.warning("nlp_provider_not_available", name=name)
+
+        logger.info("nlp_providers_registered", providers=registered)
+
+    def _build_provider(self, name: str) -> Any:
+        if name == "mock":
+            return MockProvider()
+        if name == "file":
+            return FileProvider(directory=self._settings.news_file_dir)
+        if name == "newsapi":
+            return NewsApiProvider(api_key=self._settings.newsapi_key)
+        if name == "rss":
+            urls = [u.strip() for u in self._settings.rss_feed_urls.split(",") if u.strip()]
+            return RssProvider(feed_urls=urls)
+        if name == "google_news":
+            return GoogleNewsProvider()
+        if name == "finnhub":
+            return FinnhubProvider(api_key=self._settings.finnhub_api_key)
+        if name == "none":
+            return None
+        logger.warning("unknown_nlp_provider", name=name)
+        return None
 
     async def start(self, market_slugs: list[str] | None = None) -> None:
         if self._is_equities:
@@ -319,13 +375,16 @@ class TradingBot:
         # Start health endpoint and main loops
         await self._health_server.start()
         self._running = True
-        await asyncio.gather(
+        tasks = [
             ws.connect(),
             self._intelligence_loop(),
             self._housekeeping_loop(),
             self._universe_refresh_loop(),
             self._news_service.start(),
-        )
+        ]
+        if self._llm_analyzer is not None or self._claude_analyzer is not None:
+            tasks.append(self._llm_analysis_loop())
+        await asyncio.gather(*tasks)
 
     async def stop(self) -> None:
         logger.info("bot_stopping")
@@ -337,6 +396,10 @@ class TradingBot:
 
         self._universe.stop()
         await self._news_service.stop()
+        if self._llm_analyzer is not None:
+            await self._llm_analyzer.close()
+        if self._claude_analyzer is not None:
+            await self._claude_analyzer.close()
         await self._health_server.stop()
         await self._execution.cancel_all_orders()
         await self._persist_positions()
@@ -495,11 +558,15 @@ class TradingBot:
                 if iid not in self._instrument_to_market:
                     instrument_ids.append(iid)
                     self._instrument_to_market[iid] = market
-                    self._feature_engines[iid] = FeatureEngine(
+                    fe = FeatureEngine(
                         market.market_id,
                         instrument_id=iid,
                         exchange=self._settings.exchange,
                     )
+                    ed = market.exchange_data or {}
+                    fe.volume_24h = float(ed.get("volume", 0) or 0)
+                    fe.open_interest = float(ed.get("open_interest", 0) or 0)
+                    self._feature_engines[iid] = fe
 
                     if yes_price is not None:
                         is_no = iid.endswith("-no")
@@ -579,6 +646,82 @@ class TradingBot:
 
             except Exception as e:
                 logger.error("universe_refresh_error", error=str(e))
+
+    async def _llm_analysis_loop(self) -> None:
+        """Periodically ask GPT and Claude to evaluate active markets.
+
+        Both models analyze the same markets in parallel.  For each market,
+        whichever model returns higher confidence wins.
+        """
+        await asyncio.sleep(30)
+        while self._running:
+            try:
+                if not self._active_markets:
+                    await asyncio.sleep(180)
+                    continue
+
+                news_headlines: list[str] = []
+                for sig in self._news_service.get_latest_signals():
+                    if sig.text_snippet:
+                        news_headlines.append(sig.text_snippet)
+
+                coros = []
+                labels: list[str] = []
+                if self._llm_analyzer:
+                    coros.append(
+                        self._llm_analyzer.analyze_markets(
+                            self._active_markets,
+                            news_headlines=news_headlines,
+                        )
+                    )
+                    labels.append("gpt")
+                if self._claude_analyzer:
+                    coros.append(
+                        self._claude_analyzer.analyze_markets(
+                            self._active_markets,
+                            news_headlines=news_headlines,
+                        )
+                    )
+                    labels.append("claude")
+
+                if not coros:
+                    await asyncio.sleep(180)
+                    continue
+
+                results = await asyncio.gather(*coros, return_exceptions=True)
+
+                all_signals: dict[str, tuple[str, Any]] = {}
+                for label, result in zip(labels, results):
+                    if isinstance(result, Exception):
+                        logger.error("llm_analyzer_failed", model=label, error=str(result))
+                        continue
+                    for sig in result:
+                        mid = sig.market_ids[0] if sig.market_ids else ""
+                        if not mid:
+                            continue
+                        existing = all_signals.get(mid)
+                        if existing is None or sig.confidence > existing[1].confidence:
+                            all_signals[mid] = (label, sig)
+
+                merged = [sig for _, sig in all_signals.values()]
+                self._llm_analysis_signals = merged
+
+                winners = {}
+                for mid, (label, _) in all_signals.items():
+                    winners[label] = winners.get(label, 0) + 1
+
+                logger.info(
+                    "llm_analysis_cycle_complete",
+                    markets_evaluated=len(self._active_markets),
+                    signals=len(merged),
+                    model_wins=winners,
+                    market_ids=[s.market_ids[0] for s in merged if s.market_ids],
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("llm_analysis_loop_error")
+            await asyncio.sleep(180)
 
     async def _persist_positions(self) -> None:
         try:
@@ -750,6 +893,7 @@ class TradingBot:
                 continue
 
             pending_nlp = self._news_service.get_latest_signals()
+            pending_nlp.extend(self._llm_analysis_signals)
 
             for iid, engine in self._feature_engines.items():
                 try:

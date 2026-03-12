@@ -13,6 +13,8 @@ Cancels and requotes conservatively to avoid accumulating stale orders.
 
 from __future__ import annotations
 
+import time
+
 from app.config.settings import Settings
 from app.data.models import MarketFeatures, PortfolioSnapshot, Signal, SignalAction
 from app.strategies.base import BaseStrategy, StrategyRegistry
@@ -30,9 +32,17 @@ class PassiveMarketMaker(BaseStrategy):
     MIN_DEPTH = 5.0
     # Offset from best bid/ask to avoid being first in line
     QUOTE_OFFSET = 0.01
+    # Only trade in this price range (avoids longshots and near-certainties)
+    TRADEABLE_PRICE_LOW = 0.20
+    TRADEABLE_PRICE_HIGH = 0.80
+    # Minimum 24h volume to avoid illiquid markets
+    MIN_VOLUME_24H = 50
+    # Cooldown per instrument to prevent order spam
+    COOLDOWN_SECONDS = 300.0
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
+        self._last_signal_per_instrument: dict[str, float] = {}
 
     def generate_signal(
         self,
@@ -62,6 +72,8 @@ class PassiveMarketMaker(BaseStrategy):
             price = features.best_bid
 
         confidence = self._compute_confidence(features)
+        inst_id = features.instrument_id or features.token_id
+        self._last_signal_per_instrument[inst_id] = time.time()
 
         return Signal(
             strategy_name=self.name,
@@ -82,6 +94,12 @@ class PassiveMarketMaker(BaseStrategy):
     def _market_suitable(self, f: MarketFeatures) -> bool:
         if f.best_bid is None or f.best_ask is None or f.spread is None:
             return False
+        mid = (f.best_bid + f.best_ask) / 2.0
+        if mid < self.TRADEABLE_PRICE_LOW or mid > self.TRADEABLE_PRICE_HIGH:
+            return False
+        volume = getattr(f, "volume_24h", 0) or 0
+        if volume < self.MIN_VOLUME_24H:
+            return False
         if f.spread < self.MIN_EDGE_SPREAD:
             return False
         if f.spread > self.settings.max_spread_threshold:
@@ -89,6 +107,11 @@ class PassiveMarketMaker(BaseStrategy):
         if f.bid_depth_5c < self.MIN_DEPTH or f.ask_depth_5c < self.MIN_DEPTH:
             return False
         if f.seconds_since_last_update > 30:
+            return False
+        inst_id = f.instrument_id or f.token_id
+        now = time.time()
+        last = self._last_signal_per_instrument.get(inst_id, 0.0)
+        if (now - last) < self.COOLDOWN_SECONDS:
             return False
         return True
 
@@ -99,6 +122,8 @@ class PassiveMarketMaker(BaseStrategy):
         ref_price: float,
         imbalance: float,
     ) -> Signal:
+        inst_id = features.instrument_id or features.token_id
+        self._last_signal_per_instrument[inst_id] = time.time()
         return Signal(
             strategy_name=self.name,
             market_id=features.market_id,

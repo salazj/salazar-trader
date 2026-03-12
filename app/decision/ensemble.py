@@ -37,30 +37,30 @@ class DecisionMode(str, Enum):
 
 _MODE_DEFAULTS: dict[DecisionMode, dict[str, Any]] = {
     DecisionMode.CONSERVATIVE: {
-        "min_confidence": 0.25,
-        "min_layers_agree": 1,
-        "require_l1_approval": False,
-        "min_evidence_signals": 1,
+        "min_confidence": 0.30,
+        "min_layers_agree": 2,
+        "require_l1_approval": True,
+        "min_evidence_signals": 2,
         "large_trade_threshold": 3.0,
         "large_trade_min_layers": 2,
         "conflict_tolerance": 0.15,
     },
     DecisionMode.BALANCED: {
-        "min_confidence": 0.18,
-        "min_layers_agree": 1,
-        "require_l1_approval": False,
-        "min_evidence_signals": 1,
+        "min_confidence": 0.25,
+        "min_layers_agree": 2,
+        "require_l1_approval": True,
+        "min_evidence_signals": 2,
         "large_trade_threshold": 5.0,
         "large_trade_min_layers": 2,
         "conflict_tolerance": 0.30,
     },
     DecisionMode.AGGRESSIVE: {
-        "min_confidence": 0.10,
-        "min_layers_agree": 1,
-        "require_l1_approval": False,
-        "min_evidence_signals": 1,
+        "min_confidence": 0.20,
+        "min_layers_agree": 2,
+        "require_l1_approval": True,
+        "min_evidence_signals": 2,
         "large_trade_threshold": 10.0,
-        "large_trade_min_layers": 1,
+        "large_trade_min_layers": 2,
         "conflict_tolerance": 0.50,
     },
 }
@@ -75,12 +75,12 @@ class EnsembleConfig:
     weight_l2: float = 0.40
     weight_l3: float = 0.30
 
-    min_confidence: float = 0.25
-    min_layers_agree: int = 1
+    min_confidence: float = 0.30
+    min_layers_agree: int = 2
     mode: DecisionMode = DecisionMode.CONSERVATIVE
-    require_l1_approval: bool = False
+    require_l1_approval: bool = True
 
-    min_evidence_signals: int = 1
+    min_evidence_signals: int = 2
     large_trade_threshold: float = 3.0
     large_trade_min_layers: int = 3
     conflict_tolerance: float = 0.15
@@ -323,7 +323,7 @@ def run_ensemble(
     n_agreeing = len(agreeing)
     n_active = len(active_layers)
 
-    if n_active >= config.min_layers_agree and n_agreeing < config.min_layers_agree:
+    if n_agreeing < config.min_layers_agree:
         vetoes.append(Veto(
             source=VetoSource.AGREEMENT_GATE,
             reason=(

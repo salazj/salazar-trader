@@ -102,7 +102,11 @@ class EventProbabilityModel(BaseStrategy):
         if not self._model_loaded or self._classifier is None:
             return None
 
-        if features.spread is None or features.best_bid is None:
+        if features.spread is None or features.best_bid is None or features.best_ask is None:
+            return None
+
+        mid = (features.best_bid + features.best_ask) / 2.0
+        if mid < 0.20 or mid > 0.80:
             return None
 
         x = self._extract_feature_vector(features)

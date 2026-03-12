@@ -179,6 +179,9 @@ class MarketFeatures(BaseModel):
     trade_count_1m: int = 0
     last_trade_price: float | None = None
 
+    volume_24h: float = 0.0
+    open_interest: float = 0.0
+
     seconds_since_last_update: float = 0.0
 
     def __init__(self, **data: Any) -> None:

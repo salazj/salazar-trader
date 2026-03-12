@@ -35,6 +35,10 @@ class MomentumScalper(BaseStrategy):
     MIN_DEPTH = 10.0
     # Maximum data staleness
     MAX_STALE_SECONDS = 15.0
+    # Only trade in this price range
+    TRADEABLE_PRICE_LOW = 0.20
+    TRADEABLE_PRICE_HIGH = 0.80
+    MIN_VOLUME_24H = 50
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
@@ -83,6 +87,12 @@ class MomentumScalper(BaseStrategy):
     def _preconditions_met(self, f: MarketFeatures) -> bool:
         if f.best_bid is None or f.best_ask is None or f.spread is None:
             return False
+        mid = (f.best_bid + f.best_ask) / 2.0
+        if mid < self.TRADEABLE_PRICE_LOW or mid > self.TRADEABLE_PRICE_HIGH:
+            return False
+        volume = getattr(f, "volume_24h", 0) or 0
+        if volume < self.MIN_VOLUME_24H:
+            return False
         if f.spread < self.MIN_SPREAD:
             return False
         if f.spread > self.settings.max_spread_threshold:
@@ -91,7 +101,6 @@ class MomentumScalper(BaseStrategy):
             return False
         if f.seconds_since_last_update > self.MAX_STALE_SECONDS:
             return False
-        # Cooldown check
         if (time.time() - self._last_signal_time) < self.COOLDOWN_SECONDS:
             return False
         return True

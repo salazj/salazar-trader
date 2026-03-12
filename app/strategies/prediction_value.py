@@ -1,13 +1,14 @@
 """
-Prediction Market Value Strategy
+Prediction Market Value Strategy (v2)
 
-Identifies potential value in prediction markets by detecting:
-1. Extreme prices (near 0 or 1) that imply near-certainty — often mispriced
-2. Mean-reversion signals when price moves sharply away from recent mid
-3. Spread-capture opportunities when bid-ask is wide enough
+Identifies genuine value in prediction markets via:
+1. Mean-reversion when price sharply diverges from its recent average
+2. Momentum + orderbook imbalance alignment (directional conviction)
 
-Unlike the market-maker/scalper strategies that need deep orderbooks,
-this works with the thin books typical of Kalshi prediction markets.
+DOES NOT buy contracts simply because they are cheap — a 5-cent contract
+is almost always correctly priced for a ~5 % event.  True edge requires
+either observable price dislocation or news-driven mismatch confirmed
+by the NLP layer.
 """
 
 from __future__ import annotations
@@ -25,12 +26,14 @@ from app.utils.helpers import utc_now
 
 logger = get_logger(__name__)
 
-EDGE_THRESHOLD = 0.01
-EXTREME_LOW = 0.15
-EXTREME_HIGH = 0.85
 MIN_SPREAD = 0.005
-MAX_SPREAD = 0.30
-MOMENTUM_THRESHOLD = 0.02
+MAX_SPREAD = 0.25
+MEAN_REVERSION_THRESHOLD = 0.04
+MOMENTUM_THRESHOLD = 0.03
+MIN_HISTORY = 15
+TRADEABLE_PRICE_LOW = 0.20
+TRADEABLE_PRICE_HIGH = 0.80
+MIN_VOLUME_24H = 50
 
 
 @StrategyRegistry.register
@@ -51,19 +54,32 @@ class PredictionValueStrategy(BaseStrategy):
     ) -> Signal | None:
         mid = features.mid_price
         if mid is None or mid <= 0:
-            logger.info(
-                "prediction_value_skip_no_mid",
+            return None
+
+        if mid < TRADEABLE_PRICE_LOW or mid > TRADEABLE_PRICE_HIGH:
+            logger.debug(
+                "prediction_value_skip_extreme",
                 market_id=features.market_id,
-                instrument_id=features.instrument_id,
                 mid=mid,
-                bid=features.best_bid,
-                ask=features.best_ask,
+                reason="outside tradeable range 0.20-0.80",
+            )
+            return None
+
+        vol_24h = getattr(features, "volume_24h", None) or 0
+        if vol_24h < MIN_VOLUME_24H:
+            logger.debug(
+                "prediction_value_skip_low_volume",
+                market_id=features.market_id,
+                volume_24h=vol_24h,
             )
             return None
 
         bid = features.best_bid
         ask = features.best_ask
         spread = features.spread
+
+        if spread is not None and (spread < MIN_SPREAD or spread > MAX_SPREAD):
+            return None
 
         iid = features.instrument_id or features.token_id or features.market_id
         history = self._price_history.setdefault(iid, [])
@@ -79,16 +95,9 @@ class PredictionValueStrategy(BaseStrategy):
             bid=bid,
             ask=ask,
             spread=spread,
-            extreme_low=mid < EXTREME_LOW,
-            extreme_high=mid > EXTREME_HIGH,
+            volume_24h=vol_24h,
+            history_len=len(history),
         )
-
-        if spread is not None and (spread < MIN_SPREAD or spread > MAX_SPREAD):
-            return None
-
-        signal = self._check_extreme_value(mid, bid, ask, spread, features)
-        if signal:
-            return signal
 
         signal = self._check_mean_reversion(mid, history, features)
         if signal:
@@ -100,68 +109,35 @@ class PredictionValueStrategy(BaseStrategy):
 
         return None
 
-    def _check_extreme_value(
-        self,
-        mid: float,
-        bid: float | None,
-        ask: float | None,
-        spread: float | None,
-        features: MarketFeatures,
-    ) -> Signal | None:
-        """Detect mispriced extremes: markets priced very low or very high
-        often have edge because small probability events are underpriced."""
-        if mid < EXTREME_LOW and bid is not None and bid > 0.01:
-            edge = EXTREME_LOW - mid
-            if edge >= EDGE_THRESHOLD:
-                return self._make_signal(
-                    features,
-                    SignalAction.BUY_YES,
-                    confidence=min(0.45 + edge, 0.70),
-                    price=bid + 0.01,
-                    rationale=f"extreme_low_value: price={mid:.3f} edge={edge:.3f}",
-                )
-
-        if mid > EXTREME_HIGH and ask is not None and ask < 0.99:
-            edge = mid - EXTREME_HIGH
-            if edge >= EDGE_THRESHOLD:
-                return self._make_signal(
-                    features,
-                    SignalAction.BUY_NO,
-                    confidence=min(0.45 + edge, 0.70),
-                    price=1.0 - ask + 0.01,
-                    rationale=f"extreme_high_value: price={mid:.3f} edge={edge:.3f}",
-                )
-
-        return None
-
     def _check_mean_reversion(
         self,
         mid: float,
         history: list[float],
         features: MarketFeatures,
     ) -> Signal | None:
-        """If price moved sharply from recent average, bet on reversion."""
-        if len(history) < 10:
+        """Bet on reversion when price sharply diverges from recent average."""
+        if len(history) < MIN_HISTORY:
             return None
 
-        avg = sum(history[-20:]) / len(history[-20:])
+        window = history[-20:]
+        avg = sum(window) / len(window)
         deviation = mid - avg
 
-        if abs(deviation) < MOMENTUM_THRESHOLD:
+        if abs(deviation) < MEAN_REVERSION_THRESHOLD:
             return None
 
-        if deviation > MOMENTUM_THRESHOLD:
+        if deviation > MEAN_REVERSION_THRESHOLD:
             return self._make_signal(
                 features,
                 SignalAction.SELL_YES,
-                confidence=min(0.40 + abs(deviation), 0.65),
+                confidence=min(0.35 + abs(deviation) * 2, 0.65),
                 rationale=f"mean_reversion_sell: mid={mid:.3f} avg={avg:.3f} dev={deviation:+.3f}",
             )
         else:
             return self._make_signal(
                 features,
                 SignalAction.BUY_YES,
-                confidence=min(0.40 + abs(deviation), 0.65),
+                confidence=min(0.35 + abs(deviation) * 2, 0.65),
                 rationale=f"mean_reversion_buy: mid={mid:.3f} avg={avg:.3f} dev={deviation:+.3f}",
             )
 
@@ -170,27 +146,27 @@ class PredictionValueStrategy(BaseStrategy):
         mid: float,
         features: MarketFeatures,
     ) -> Signal | None:
-        """Use short-term momentum and orderbook imbalance as edge signal."""
+        """Use short-term momentum + orderbook imbalance when aligned."""
         momentum = features.momentum_1m
         imbalance = features.orderbook_imbalance
 
         if momentum is None or imbalance is None:
             return None
-        if abs(momentum) < 0.02:
+        if abs(momentum) < MOMENTUM_THRESHOLD:
             return None
 
-        if momentum > 0.02 and imbalance > 0.2:
+        if momentum > MOMENTUM_THRESHOLD and imbalance > 0.3:
             return self._make_signal(
                 features,
                 SignalAction.BUY_YES,
-                confidence=min(0.40 + abs(momentum) + abs(imbalance) * 0.3, 0.65),
+                confidence=min(0.35 + abs(momentum) * 2 + abs(imbalance) * 0.2, 0.65),
                 rationale=f"momentum_edge_buy: mom={momentum:+.3f} imb={imbalance:+.3f}",
             )
-        elif momentum < -0.02 and imbalance < -0.2:
+        elif momentum < -MOMENTUM_THRESHOLD and imbalance < -0.3:
             return self._make_signal(
                 features,
                 SignalAction.SELL_YES,
-                confidence=min(0.40 + abs(momentum) + abs(imbalance) * 0.3, 0.65),
+                confidence=min(0.35 + abs(momentum) * 2 + abs(imbalance) * 0.2, 0.65),
                 rationale=f"momentum_edge_sell: mom={momentum:+.3f} imb={imbalance:+.3f}",
             )
 

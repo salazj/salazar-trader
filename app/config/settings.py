@@ -114,9 +114,12 @@ class Settings(BaseSettings):
 
     # --- NLP / News ---
     nlp_provider: str = "mock"
+    nlp_providers: str = ""
     news_poll_interval: int = Field(default=300, ge=10)
     news_file_dir: str = "data/news"
     newsapi_key: str = ""
+    rss_feed_urls: str = ""
+    finnhub_api_key: str = ""
 
     # --- LLM / AI Provider ---
     # "none" (default), "local_open_source", "hosted_api"
@@ -127,6 +130,10 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = Field(default=30, ge=1)
     # Confidence threshold below which the hybrid classifier ignores LLM output
     llm_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    # --- Claude API (second LLM for competitive analysis) ---
+    claude_api_key: str = ""
+    claude_model_name: str = "claude-sonnet-4-6"
 
     # --- Level 2 ML ---
     # "logistic_regression", "gradient_boosting", "random_forest"

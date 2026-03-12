@@ -170,19 +170,26 @@ class UniverseManager:
                 total_active=len(active_markets),
                 filter_reasons={r: sum(1 for _, x in filtered_out if x.split(":")[0] == r.split(":")[0])
                                 for _, r in filtered_out[:5]},
-                hint="Falling back to relaxed mode — skipping hard filters",
+                hint="Falling back to relaxed mode — keeping volume filter only",
             )
+            min_vol = self._filter.config.min_volume
             eligible = [
                 m for m in active_markets
                 if self._categories.is_allowed(m)
+                and float((m.exchange_data or {}).get("volume", 0) or 0) >= min_vol
             ]
             if not eligible:
                 logger.warning(
-                    "no_markets_pass_category_filter",
+                    "no_markets_pass_relaxed_filter",
                     total_active=len(active_markets),
-                    include=list(self._categories.config.include_categories)[:5],
-                    hint="Accepting all markets regardless of category",
+                    min_volume=min_vol,
+                    hint="Accepting all markets with any category",
                 )
+                eligible = [
+                    m for m in active_markets
+                    if float((m.exchange_data or {}).get("volume", 0) or 0) >= min_vol
+                ]
+            if not eligible:
                 eligible = list(active_markets)
 
         for mid in self._scanner.resolved:

@@ -111,8 +111,23 @@ class NlpPipeline:
 
         clean_text = norm.normalized
 
-        # ── Step 2: Classify ──
-        result = self._classifier.classify(clean_text)
+        # ── Step 2: Map to markets (before classification so we can pass context) ──
+        pre_matches = self._mapper.find_matches(
+            text=clean_text,
+            entities=[],
+            markets=active_markets,
+        )
+
+        # ── Step 3: Classify (with market context if available) ──
+        market_context = None
+        if pre_matches:
+            best = max(pre_matches, key=lambda m: m.relevance_score)
+            ed = best.market.exchange_data or {}
+            question = ed.get("title") or ed.get("question") or best.market.slug or ""
+            if question:
+                market_context = {"question": question}
+
+        result = self._classifier.classify(clean_text, market_context)
         trace.classification = result
         trace.steps.append(f"classified: {result.event_type.value}/{result.sentiment.value}")
 
@@ -122,7 +137,7 @@ class NlpPipeline:
             self._log_trace(trace)
             return []
 
-        # ── Step 3: Map to markets ──
+        # ── Step 4: Refine market mapping with entities from classification ──
         matches = self._mapper.find_matches(
             text=clean_text,
             entities=result.entities,
@@ -137,7 +152,7 @@ class NlpPipeline:
             self._log_trace(trace)
             return []
 
-        # ── Step 4: Generate structured signals ──
+        # ── Step 5: Generate structured signals ──
         signals: list[NlpSignal] = []
         for m in matches:
             combined_confidence = result.confidence * m.relevance_score
