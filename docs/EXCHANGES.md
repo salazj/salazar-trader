@@ -47,8 +47,8 @@ POLY_PASSPHRASE=your_passphrase
 KALSHI_API_KEY=your_api_key
 KALSHI_PRIVATE_KEY_PATH=/path/to/your/kalshi_private.pem
 KALSHI_DEMO_MODE=true      # Use demo environment (recommended first)
-KALSHI_BASE_URL=https://trading-api.kalshi.com/trade-api/v2   # production (default)
-KALSHI_WS_URL=wss://trading-api.kalshi.com/trade-api/ws/v2    # production (default)
+KALSHI_BASE_URL=https://api.elections.kalshi.com/trade-api/v2   # production (default)
+KALSHI_WS_URL=wss://api.elections.kalshi.com/trade-api/ws/v2    # production (default)
 ```
 
 #### Generating Kalshi API Credentials

@@ -573,7 +573,8 @@ class TestKalshiAuth:
 
 
 class TestKalshiMarketDataAuth:
-    def test_get_markets_signs_query_params(self, settings):
+    def test_get_markets_signs_path_without_query_params(self, settings):
+        """Kalshi requires signing the path WITHOUT query parameters."""
         from app.exchanges.kalshi.market_data import KalshiMarketDataClient
 
         client = KalshiMarketDataClient(settings)
@@ -589,11 +590,14 @@ class TestKalshiMarketDataAuth:
 
         client._auth.sign_request.assert_called_once()
         _, signed_path = client._auth.sign_request.call_args[0]
-        assert signed_path.startswith("/trade-api/v2/markets?")
-        assert "limit=100" in signed_path
-        assert "status=open" in signed_path
+        assert signed_path == "/trade-api/v2/markets"
+        assert "?" not in signed_path
 
         asyncio.get_event_loop().run_until_complete(client.close())
+
+    def test_default_base_url_uses_elections_domain(self, settings):
+        """Production URL must use api.elections.kalshi.com (not trading-api)."""
+        assert "api.elections.kalshi.com" in settings.kalshi_base_url
 
 
 # ═══════════════════════════════════════════════════════════════════════
