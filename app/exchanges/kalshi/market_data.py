@@ -43,8 +43,12 @@ class KalshiMarketDataClient(BaseMarketDataClient):
         self._base_url = base_url
         self._auth: KalshiAuth | None = None
 
-        if settings.kalshi_api_key and settings.kalshi_private_key_path:
-            self._auth = KalshiAuth(settings.kalshi_api_key, settings.kalshi_private_key_path)
+        if settings.kalshi_api_key and (settings.kalshi_private_key or settings.kalshi_private_key_path):
+            self._auth = KalshiAuth(
+                settings.kalshi_api_key,
+                settings.kalshi_private_key_path,
+                private_key_pem=settings.kalshi_private_key,
+            )
 
         self._client = httpx.AsyncClient(
             base_url=self._base_url,

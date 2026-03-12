@@ -54,8 +54,12 @@ class KalshiExecutionClient(BaseExecutionClient):
         self._auth: KalshiAuth | None = None
         self._client: httpx.AsyncClient | None = None
 
-        if not self._dry_run and settings.kalshi_api_key and settings.kalshi_private_key_path:
-            self._auth = KalshiAuth(settings.kalshi_api_key, settings.kalshi_private_key_path)
+        if not self._dry_run and settings.kalshi_api_key and (settings.kalshi_private_key or settings.kalshi_private_key_path):
+            self._auth = KalshiAuth(
+                settings.kalshi_api_key,
+                settings.kalshi_private_key_path,
+                private_key_pem=settings.kalshi_private_key,
+            )
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
                 timeout=DEFAULT_TIMEOUT,

@@ -68,6 +68,7 @@ class Settings(BaseSettings):
 
     # --- Kalshi API ---
     kalshi_api_key: str = ""
+    kalshi_private_key: str = ""
     kalshi_private_key_path: str = ""
     kalshi_base_url: str = "https://trading-api.kalshi.com/trade-api/v2"
     kalshi_ws_url: str = "wss://trading-api.kalshi.com/trade-api/ws/v2"
@@ -104,6 +105,7 @@ class Settings(BaseSettings):
     nlp_provider: str = "mock"
     news_poll_interval: int = Field(default=300, ge=10)
     news_file_dir: str = "data/news"
+    newsapi_key: str = ""
 
     # --- LLM / AI Provider ---
     # "none" (default), "local_open_source", "hosted_api"
@@ -211,7 +213,7 @@ class Settings(BaseSettings):
 
     @property
     def has_kalshi_credentials(self) -> bool:
-        return bool(self.kalshi_api_key and self.kalshi_private_key_path)
+        return bool(self.kalshi_api_key and (self.kalshi_private_key or self.kalshi_private_key_path))
 
     @property
     def has_credentials(self) -> bool:
@@ -253,7 +255,8 @@ class Settings(BaseSettings):
         """Override repr to redact secrets."""
         _SECRETS = {
             "private_key", "poly_api_key", "poly_api_secret", "poly_passphrase",
-            "llm_api_key", "kalshi_api_key", "kalshi_private_key_path",
+            "llm_api_key", "kalshi_api_key", "kalshi_private_key", "kalshi_private_key_path",
+            "newsapi_key",
         }
         safe_fields = {
             k: ("***" if k in _SECRETS and v else v)

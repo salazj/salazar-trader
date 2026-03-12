@@ -42,9 +42,14 @@ if [ "${DRY_RUN}" = "false" ] && [ "${ENABLE_LIVE_TRADING}" = "true" ] && [ "${L
     echo ""
 
     if [ "${EXCHANGE}" = "kalshi" ]; then
-        if [ -z "${KALSHI_API_KEY:-}" ] || [ -z "${KALSHI_PRIVATE_KEY_PATH:-}" ]; then
-            echo "ERROR: Kalshi live trading requires KALSHI_API_KEY and KALSHI_PRIVATE_KEY_PATH."
-            echo "       Set them in your .env file or environment."
+        if [ -z "${KALSHI_API_KEY:-}" ]; then
+            echo "ERROR: Kalshi live trading requires KALSHI_API_KEY."
+            echo "       Set it in your .env file or environment."
+            exit 1
+        fi
+        if [ -z "${KALSHI_PRIVATE_KEY:-}" ] && [ -z "${KALSHI_PRIVATE_KEY_PATH:-}" ]; then
+            echo "ERROR: Kalshi live trading requires KALSHI_PRIVATE_KEY or KALSHI_PRIVATE_KEY_PATH."
+            echo "       Set one of them in your .env file or environment."
             exit 1
         fi
     else

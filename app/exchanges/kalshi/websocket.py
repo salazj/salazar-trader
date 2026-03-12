@@ -58,8 +58,12 @@ class KalshiWebSocketClient(BaseWebSocketClient):
         self._ws_url = DEMO_WS_URL if settings.kalshi_demo_mode else settings.kalshi_ws_url
         self._auth: KalshiAuth | None = None
 
-        if settings.kalshi_api_key and settings.kalshi_private_key_path:
-            self._auth = KalshiAuth(settings.kalshi_api_key, settings.kalshi_private_key_path)
+        if settings.kalshi_api_key and (settings.kalshi_private_key or settings.kalshi_private_key_path):
+            self._auth = KalshiAuth(
+                settings.kalshi_api_key,
+                settings.kalshi_private_key_path,
+                private_key_pem=settings.kalshi_private_key,
+            )
 
         self._ws: Any = None
         self._subscriptions: list[dict[str, Any]] = []

@@ -33,24 +33,44 @@ logger = get_logger(__name__)
 class KalshiAuth:
     """Generates signed headers for Kalshi API requests."""
 
-    def __init__(self, api_key: str, private_key_path: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        private_key_path: str = "",
+        *,
+        private_key_pem: str = "",
+    ) -> None:
         if not api_key:
             raise ValueError("Kalshi API key must not be empty")
         self._api_key = api_key
-        self._private_key = self._load_private_key(private_key_path)
+        self._private_key = self._resolve_private_key(private_key_pem, private_key_path)
         logger.info("kalshi_auth_initialized", key_prefix=api_key[:6] + "…")
 
     @staticmethod
-    def _load_private_key(path: str) -> rsa.RSAPrivateKey:
-        key_path = Path(path).expanduser().resolve()
-        if not key_path.exists():
-            raise FileNotFoundError(f"Kalshi private key not found at {key_path}")
+    def _resolve_private_key(
+        pem_content: str, path: str
+    ) -> rsa.RSAPrivateKey:
+        """Load the RSA key from inline PEM content or a file path."""
+        if pem_content:
+            pem_content = pem_content.replace("\\n", "\n").strip()
+            pem_data = pem_content.encode("utf-8")
+            source = "inline env var"
+        elif path:
+            key_path = Path(path).expanduser().resolve()
+            if not key_path.exists():
+                raise FileNotFoundError(f"Kalshi private key not found at {key_path}")
+            pem_data = key_path.read_bytes()
+            source = str(key_path)
+        else:
+            raise ValueError(
+                "Set KALSHI_PRIVATE_KEY (paste PEM content) or "
+                "KALSHI_PRIVATE_KEY_PATH (file path) in your .env"
+            )
 
-        pem_data = key_path.read_bytes()
         try:
             key = serialization.load_pem_private_key(pem_data, password=None)
         except Exception as exc:
-            raise ValueError(f"Failed to parse private key at {key_path}: {exc}") from exc
+            raise ValueError(f"Failed to parse private key from {source}: {exc}") from exc
 
         if not isinstance(key, rsa.RSAPrivateKey):
             raise TypeError(

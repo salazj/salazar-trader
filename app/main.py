@@ -35,6 +35,7 @@ from app.nlp.pipeline import NlpPipeline, nlp_signal_to_layered
 from app.nlp.providers.llm_provider import build_llm_classifier
 from app.nlp.providers.mock import MockProvider
 from app.nlp.providers.file_provider import FileProvider
+from app.nlp.providers.newsapi import NewsApiProvider
 from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import RiskManager
 from app.storage.repository import Repository
@@ -157,6 +158,10 @@ class TradingBot:
         elif provider_name == "file":
             self._news_service.register_provider(
                 FileProvider(directory=self._settings.news_file_dir)
+            )
+        elif provider_name == "newsapi":
+            self._news_service.register_provider(
+                NewsApiProvider(api_key=self._settings.newsapi_key)
             )
         elif provider_name == "none":
             pass
