@@ -76,3 +76,4 @@ def _import_all_strategies() -> None:
     import app.strategies.momentum_scalper  # noqa: F401
     import app.strategies.event_probability_model  # noqa: F401
     import app.strategies.sentiment_adapter  # noqa: F401
+    import app.strategies.prediction_value  # noqa: F401

@@ -9,7 +9,10 @@ import asyncio
 import hashlib
 import time
 from collections import OrderedDict
+from datetime import timedelta
 from typing import Callable
+
+from app.utils.helpers import utc_now
 
 from app.data.models import Market
 from app.monitoring import get_logger
@@ -41,6 +44,7 @@ class NewsIngestionService:
 
         self._seen_hashes: OrderedDict[str, float] = OrderedDict()
         self._latest_signals: list[NlpSignal] = []
+        self._max_signal_age = poll_interval * 3
         self._running = False
 
         self._get_markets: Callable[[], list[Market]] | None = None
@@ -76,10 +80,13 @@ class NewsIngestionService:
         return await self._poll_cycle()
 
     def get_latest_signals(self) -> list[NlpSignal]:
-        """Return the most recent batch of signals (consumed by the decision loop)."""
-        sigs = self._latest_signals
-        self._latest_signals = []
-        return sigs
+        """Return all buffered signals without clearing.
+
+        Signals are kept for multiple intelligence loop iterations so every
+        market gets a chance to match.  Old signals are pruned in
+        ``_poll_cycle`` when fresh ones arrive.
+        """
+        return list(self._latest_signals)
 
     async def _poll_cycle(self) -> list[NlpSignal]:
         all_items: list[NewsItem] = []
@@ -100,6 +107,12 @@ class NewsIngestionService:
 
         markets = self._get_markets() if self._get_markets else []
         signals = self._pipeline.process_batch(all_items, markets)
+
+        cutoff = utc_now() - timedelta(seconds=self._max_signal_age)
+        self._latest_signals = [
+            s for s in self._latest_signals
+            if s.source_timestamp > cutoff
+        ]
         self._latest_signals.extend(signals)
         metrics.increment("nlp_signals_generated", len(signals))
 

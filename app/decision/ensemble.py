@@ -37,17 +37,17 @@ class DecisionMode(str, Enum):
 
 _MODE_DEFAULTS: dict[DecisionMode, dict[str, Any]] = {
     DecisionMode.CONSERVATIVE: {
-        "min_confidence": 0.65,
-        "min_layers_agree": 2,
-        "require_l1_approval": True,
-        "min_evidence_signals": 2,
+        "min_confidence": 0.50,
+        "min_layers_agree": 1,
+        "require_l1_approval": False,
+        "min_evidence_signals": 1,
         "large_trade_threshold": 3.0,
-        "large_trade_min_layers": 3,
+        "large_trade_min_layers": 2,
         "conflict_tolerance": 0.15,
     },
     DecisionMode.BALANCED: {
-        "min_confidence": 0.55,
-        "min_layers_agree": 2,
+        "min_confidence": 0.40,
+        "min_layers_agree": 1,
         "require_l1_approval": False,
         "min_evidence_signals": 1,
         "large_trade_threshold": 5.0,
@@ -55,7 +55,7 @@ _MODE_DEFAULTS: dict[DecisionMode, dict[str, Any]] = {
         "conflict_tolerance": 0.30,
     },
     DecisionMode.AGGRESSIVE: {
-        "min_confidence": 0.40,
+        "min_confidence": 0.30,
         "min_layers_agree": 1,
         "require_l1_approval": False,
         "min_evidence_signals": 1,
@@ -75,12 +75,12 @@ class EnsembleConfig:
     weight_l2: float = 0.40
     weight_l3: float = 0.30
 
-    min_confidence: float = 0.55
-    min_layers_agree: int = 2
+    min_confidence: float = 0.50
+    min_layers_agree: int = 1
     mode: DecisionMode = DecisionMode.CONSERVATIVE
-    require_l1_approval: bool = True
+    require_l1_approval: bool = False
 
-    min_evidence_signals: int = 2
+    min_evidence_signals: int = 1
     large_trade_threshold: float = 3.0
     large_trade_min_layers: int = 3
     conflict_tolerance: float = 0.15

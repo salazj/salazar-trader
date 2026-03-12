@@ -701,9 +701,6 @@ class TradingBot:
             for iid, engine in self._feature_engines.items():
                 try:
                     book = self._orderbook.get_snapshot(iid)
-                    if book is None:
-                        continue
-
                     features = engine.compute(book)
                     portfolio_snap = self._portfolio.get_snapshot()
 
@@ -770,7 +767,7 @@ class TradingBot:
                             instrument_id=ls.instrument_id or ls.token_id,
                             exchange=ls.exchange or self._settings.exchange,
                             action=ls.action,
-                            confidence=ls.confidence,
+                            confidence=ls.normalized_confidence,
                             suggested_price=ls.suggested_price,
                             suggested_size=ls.suggested_size,
                             rationale=ls.rationale,

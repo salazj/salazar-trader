@@ -97,22 +97,28 @@ class FeatureEngine:
         self._price_history.append(trade.price)
         self._last_update = time.time()
 
-    def compute(self, book: OrderbookSnapshot) -> MarketFeatures:
-        best_bid = book.bids[0].price if book.bids else None
-        best_ask = book.asks[0].price if book.asks else None
+    def compute(self, book: OrderbookSnapshot | None = None) -> MarketFeatures:
+        best_bid = None
+        best_ask = None
+        microprice = None
+        imbalance = None
+        bid_depth = 0.0
+        ask_depth = 0.0
+
+        if book is not None:
+            best_bid = book.bids[0].price if book.bids else None
+            best_ask = book.asks[0].price if book.asks else None
+            microprice = compute_microprice(book)
+            imbalance = compute_orderbook_imbalance(book)
+            ref = (best_bid + best_ask) / 2.0 if best_bid and best_ask else 0.5
+            bid_depth = compute_depth_within(book.bids, ref, 0.05)
+            ask_depth = compute_depth_within(book.asks, ref, 0.05)
 
         spread = None
         mid = None
         if best_bid is not None and best_ask is not None:
             spread = best_ask - best_bid
             mid = (best_bid + best_ask) / 2.0
-
-        microprice = compute_microprice(book)
-        imbalance = compute_orderbook_imbalance(book)
-
-        ref = mid or 0.5
-        bid_depth = compute_depth_within(book.bids, ref, 0.05)
-        ask_depth = compute_depth_within(book.asks, ref, 0.05)
 
         prices = list(self._price_history)
         trades = list(self._trades)
