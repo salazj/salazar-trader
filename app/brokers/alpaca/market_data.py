@@ -78,7 +78,7 @@ class AlpacaMarketData(BaseBrokerMarketData):
                     "low": float(bar.low),
                     "close": float(bar.close),
                     "volume": int(bar.volume),
-                    "timestamp": bar.timestamp.isoformat(),
+                    "timestamp": bar.timestamp.isoformat() if hasattr(bar.timestamp, "isoformat") else str(bar.timestamp),
                     "vwap": float(bar.vwap) if hasattr(bar, "vwap") and bar.vwap else None,
                 })
             return result

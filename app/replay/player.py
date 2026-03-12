@@ -166,7 +166,7 @@ class ReplayPlayer:
         signal = self._strategy.generate_signal(features, portfolio_snap)
         if signal is not None:
             self._signals.append({
-                "timestamp": signal.timestamp.isoformat(),
+                "timestamp": signal.timestamp.isoformat() if hasattr(signal.timestamp, "isoformat") else str(signal.timestamp),
                 "action": signal.action.value,
                 "confidence": signal.confidence,
                 "price": signal.suggested_price,

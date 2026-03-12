@@ -204,7 +204,7 @@ class PortfolioTracker:
     def export_summary(self, path: Path | None = None) -> dict:
         snap = self.get_snapshot()
         summary = {
-            "timestamp": snap.timestamp.isoformat(),
+            "timestamp": snap.timestamp.isoformat() if hasattr(snap.timestamp, "isoformat") else str(snap.timestamp),
             "cash": snap.cash,
             "total_exposure": snap.total_exposure,
             "total_unrealized_pnl": snap.total_unrealized_pnl,

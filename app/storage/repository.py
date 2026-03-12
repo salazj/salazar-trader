@@ -23,6 +23,17 @@ from app.monitoring import get_logger
 
 logger = get_logger(__name__)
 
+
+def _to_iso(value: Any) -> str | None:
+    """Safely convert a datetime or string to an ISO-format string."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
     condition_id TEXT PRIMARY KEY,
@@ -251,12 +262,12 @@ class Repository:
                 market.question,
                 market.slug,
                 json.dumps([t.model_dump() for t in market.tokens]),
-                market.end_date.isoformat() if market.end_date else None,
+                _to_iso(market.end_date),
                 int(market.active),
                 market.minimum_order_size,
                 market.minimum_tick_size,
                 market.exchange,
-                datetime.utcnow().isoformat(),
+                _to_iso(datetime.utcnow()),
             ),
         )
         await self._db.commit()
@@ -276,7 +287,7 @@ class Repository:
     async def save_raw_event(self, event_type: str, token_id: str, payload: dict) -> None:
         """Buffer a raw event for batch write."""
         self._event_buffer.append(
-            (event_type, token_id, json.dumps(payload), datetime.utcnow().isoformat())
+            (event_type, token_id, json.dumps(payload), _to_iso(datetime.utcnow()))
         )
         await self._flush_if_needed()
 
@@ -306,7 +317,7 @@ class Repository:
         self._feature_buffer.append((
             features.market_id,
             features.token_id,
-            features.timestamp.isoformat(),
+            _to_iso(features.timestamp),
             features.model_dump_json(),
         ))
         await self._flush_if_needed()
@@ -340,7 +351,7 @@ class Repository:
                 signal.suggested_price,
                 signal.suggested_size,
                 signal.rationale,
-                signal.timestamp.isoformat(),
+                _to_iso(signal.timestamp),
             ),
         )
         await self._db.commit()
@@ -367,8 +378,8 @@ class Repository:
                 order.status.value,
                 order.exchange_order_id,
                 order.signal_id,
-                order.created_at.isoformat(),
-                order.updated_at.isoformat(),
+                _to_iso(order.created_at),
+                _to_iso(order.updated_at),
             ),
         )
         await self._db.commit()
@@ -393,7 +404,7 @@ class Repository:
         assert self._db is not None
         await self._db.execute(
             "INSERT INTO fills (order_id, price, size, pnl, filled_at) VALUES (?, ?, ?, ?, ?)",
-            (order_id, price, size, pnl, datetime.utcnow().isoformat()),
+            (order_id, price, size, pnl, _to_iso(datetime.utcnow())),
         )
         await self._db.commit()
 
@@ -418,7 +429,7 @@ class Repository:
                 p.size,
                 p.avg_entry_price,
                 p.realized_pnl,
-                p.updated_at.isoformat(),
+                _to_iso(p.updated_at),
             ),
         )
         await self._db.commit()
@@ -462,7 +473,7 @@ class Repository:
                 total_realized_pnl, daily_pnl, positions_json)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
-                datetime.utcnow().isoformat(),
+                _to_iso(datetime.utcnow()),
                 cash,
                 total_exposure,
                 total_unrealized,
@@ -512,7 +523,7 @@ class Repository:
                 item_id, source, text, url, content_hash, normalized_text,
                 event_type, sentiment, sentiment_score, urgency, relevance,
                 confidence, json.dumps(entities or []), rationale,
-                datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
+                _to_iso(datetime.utcnow()), _to_iso(datetime.utcnow()),
             ),
         )
         await self._db.commit()
@@ -569,7 +580,7 @@ class Repository:
                 source_text_id, source_provider, market_id, sentiment,
                 sentiment_score, event_type, urgency, relevance, confidence,
                 rationale, json.dumps(entities or []), text_snippet,
-                json.dumps(metadata or {}), datetime.utcnow().isoformat(),
+                json.dumps(metadata or {}), _to_iso(datetime.utcnow()),
             ),
         )
         await self._db.commit()

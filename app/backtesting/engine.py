@@ -220,7 +220,7 @@ class BacktestEngine:
         self._pnl_by_market[signal.market_id] += pnl
 
         self._trades.append({
-            "timestamp": features.timestamp.isoformat(),
+            "timestamp": features.timestamp.isoformat() if hasattr(features.timestamp, "isoformat") else str(features.timestamp),
             "market_id": signal.market_id,
             "instrument_id": iid,
             "exchange": signal.exchange,
@@ -485,7 +485,7 @@ class MultiLayerBacktestEngine:
         self._pnl_by_layer[layer] = self._pnl_by_layer.get(layer, 0.0) + pnl
 
         self._trades.append({
-            "timestamp": features.timestamp.isoformat(),
+            "timestamp": features.timestamp.isoformat() if hasattr(features.timestamp, "isoformat") else str(features.timestamp),
             "market_id": signal.market_id,
             "instrument_id": iid,
             "exchange": signal.exchange,

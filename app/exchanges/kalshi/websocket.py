@@ -317,7 +317,7 @@ class KalshiWebSocketClient(BaseWebSocketClient):
                 "price": trade.price,
                 "size": trade.size,
                 "side": trade.side.value,
-                "timestamp": trade.timestamp.isoformat() if trade.timestamp else None,
+                "timestamp": (trade.timestamp.isoformat() if hasattr(trade.timestamp, "isoformat") else str(trade.timestamp)) if trade.timestamp else None,
             })
 
         normalized: dict[str, Any] = {
