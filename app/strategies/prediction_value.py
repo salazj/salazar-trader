@@ -51,7 +51,7 @@ class PredictionValueStrategy(BaseStrategy):
     ) -> Signal | None:
         mid = features.mid_price
         if mid is None or mid <= 0:
-            logger.debug(
+            logger.info(
                 "prediction_value_skip_no_mid",
                 market_id=features.market_id,
                 instrument_id=features.instrument_id,
@@ -71,7 +71,7 @@ class PredictionValueStrategy(BaseStrategy):
         if len(history) > self._max_history:
             history.pop(0)
 
-        logger.debug(
+        logger.info(
             "prediction_value_eval",
             market_id=features.market_id,
             instrument_id=iid,
