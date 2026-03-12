@@ -572,6 +572,30 @@ class TestKalshiAuth:
             KalshiAuth("key", str(key_file))
 
 
+class TestKalshiMarketDataAuth:
+    def test_get_markets_signs_query_params(self, settings):
+        from app.exchanges.kalshi.market_data import KalshiMarketDataClient
+
+        client = KalshiMarketDataClient(settings)
+        client._auth = MagicMock()
+        client._auth.sign_request.return_value = {"X-Test": "signed"}
+
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"markets": [], "cursor": ""}
+        client._client.get = AsyncMock(return_value=response)
+
+        asyncio.get_event_loop().run_until_complete(client.get_markets())
+
+        client._auth.sign_request.assert_called_once()
+        _, signed_path = client._auth.sign_request.call_args[0]
+        assert signed_path.startswith("/trade-api/v2/markets?")
+        assert "limit=100" in signed_path
+        assert "status=open" in signed_path
+
+        asyncio.get_event_loop().run_until_complete(client.close())
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Execution client
 # ═══════════════════════════════════════════════════════════════════════

@@ -59,10 +59,17 @@ class KalshiMarketDataClient(BaseMarketDataClient):
     async def close(self) -> None:
         await self._client.aclose()
 
-    def _auth_headers(self, method: str, path: str) -> dict[str, str]:
+    def _auth_headers(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
         if self._auth is None:
             return {}
-        full_path = "/trade-api/v2" + path
+        query = str(httpx.QueryParams(params or {}))
+        path_with_query = f"{path}?{query}" if query else path
+        full_path = "/trade-api/v2" + path_with_query
         return self._auth.sign_request(method, full_path)
 
     @retry(
@@ -71,7 +78,7 @@ class KalshiMarketDataClient(BaseMarketDataClient):
         reraise=True,
     )
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        headers = self._auth_headers("GET", path)
+        headers = self._auth_headers("GET", path, params=params)
         resp = await self._client.get(path, params=params, headers=headers)
         resp.raise_for_status()
         return resp.json()
