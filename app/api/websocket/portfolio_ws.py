@@ -23,6 +23,6 @@ async def ws_portfolio(websocket: WebSocket) -> None:
                 "portfolio": portfolio.model_dump(),
                 "recent_orders": [o.model_dump() for o in orders],
             })
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(2.0)
     except (WebSocketDisconnect, Exception):
         pass

@@ -19,7 +19,7 @@ const links = [
 ];
 
 export function Sidebar() {
-  const { connected } = useBotStatus();
+  const { connected, botStatus } = useBotStatus();
 
   return (
     <>
@@ -27,7 +27,7 @@ export function Sidebar() {
       <aside className="hidden md:flex md:w-60 md:flex-col md:fixed md:inset-y-0 border-r bg-card z-30">
         <div className="flex h-14 items-center justify-between border-b px-4">
           <span className="text-lg font-bold tracking-tight">$alazar-Trader</span>
-          <ConnectionDot connected={connected} />
+          <ConnectionDot connected={connected} botRunning={botStatus.running} />
         </div>
         <nav className="flex-1 space-y-1 px-2 py-4">
           {links.map((l) => (

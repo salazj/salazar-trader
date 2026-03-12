@@ -228,14 +228,40 @@ class TradingBot:
 
         await self._repository.initialize()
 
-        # Strategic market-universe selection
-        self._active_markets = await self._universe.initial_selection(
-            market_slugs=market_slugs,
-        )
+        # Fetch actual exchange balance and sync portfolio
+        try:
+            exchange_balance = await self._adapter.execution.get_balance()
+            if exchange_balance > 0:
+                self._portfolio._cash = exchange_balance
+                self._portfolio._initial_cash = exchange_balance
+                logger.info("exchange_balance_synced", balance=exchange_balance)
+        except Exception as e:
+            logger.warning("exchange_balance_fetch_failed", error=str(e))
+
+        # Strategic market-universe selection with retry
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            self._active_markets = await self._universe.initial_selection(
+                market_slugs=market_slugs,
+            )
+            if self._active_markets:
+                break
+            if attempt < max_retries:
+                logger.warning(
+                    "no_markets_found_retrying",
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    next_retry_seconds=30,
+                )
+                await asyncio.sleep(30)
 
         if not self._active_markets:
-            logger.error("no_active_markets_found")
-            return
+            raise RuntimeError(
+                "No active markets found after scanning. "
+                "This usually means the exchange API returned no markets, "
+                "or your category/filter settings are too restrictive. "
+                "Try broadening your categories or leaving filters at defaults."
+            )
 
         instrument_ids = await self._setup_market_instruments(self._active_markets)
 
@@ -321,10 +347,24 @@ class TradingBot:
 
         await self._repository.initialize()
 
+        # Fetch actual broker balance and sync portfolio
+        try:
+            acct = await self._broker.execution.get_account()
+            broker_balance = float(acct.get("cash", acct.get("buying_power", 0)))
+            if broker_balance > 0:
+                self._portfolio._cash = broker_balance
+                self._portfolio._initial_cash = broker_balance
+                logger.info("broker_balance_synced", balance=broker_balance)
+        except Exception as e:
+            logger.warning("broker_balance_fetch_failed", error=str(e))
+
         symbols = await self._stock_universe.initial_selection()
         if not symbols:
-            logger.error("no_stock_symbols_selected")
-            return
+            raise RuntimeError(
+                "No stock symbols selected. "
+                "Add ticker symbols in the configuration, "
+                "or switch universe mode to 'filtered' to discover stocks automatically."
+            )
 
         from app.stocks.features import StockFeatureEngine
 

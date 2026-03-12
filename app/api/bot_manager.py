@@ -133,6 +133,7 @@ class BotManager:
             self._task = None
             self._started_at = None
             self._session_id = ""
+            self._error = None
             logger.info("bot_session_stopped", session_id=old_session)
             return self.get_status()
 
@@ -290,9 +291,9 @@ class BotManager:
             slugs = config.market_slugs if config.market_slugs else None
             await self._bot.start(market_slugs=slugs)
         except asyncio.CancelledError:
-            pass
+            return
         except Exception as exc:
-            self._error = f"{type(exc).__name__}: {exc}"
+            self._error = str(exc)
             logger.error(
                 "bot_crashed",
                 session_id=self._session_id,
@@ -301,6 +302,8 @@ class BotManager:
             )
         finally:
             self._started_at = None
+            if not self._error:
+                self._error = "Bot stopped unexpectedly. Check the logs for details."
 
     def _validate_config(self, config: RunConfig) -> ValidationResult:
         errors: list[str] = []

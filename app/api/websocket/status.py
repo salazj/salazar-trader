@@ -23,6 +23,6 @@ async def ws_status(websocket: WebSocket) -> None:
                 "bot": status.model_dump(),
                 "risk": risk.model_dump(),
             })
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.5)
     except (WebSocketDisconnect, Exception):
         pass
