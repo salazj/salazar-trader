@@ -121,6 +121,24 @@ class Settings(BaseSettings):
     # "logistic_regression", "gradient_boosting", "random_forest"
     ml_model_name: str = "gradient_boosting"
 
+    # --- Universe Selection ---
+    max_tracked_markets: int = Field(default=50, ge=1)
+    max_subscribed_markets: int = Field(default=20, ge=1)
+    max_trade_candidates: int = Field(default=10, ge=1)
+    universe_refresh_seconds: int = Field(default=300, ge=30)
+    min_liquidity_threshold: float = Field(default=10.0, ge=0)
+    max_spread_filter: float = Field(default=0.20, ge=0, le=1)
+    min_volume_threshold: float = Field(default=0.0, ge=0)
+    min_orderbook_depth: float = Field(default=5.0, ge=0)
+    min_time_to_resolution_hours: float = Field(default=1.0, ge=0)
+    max_time_to_resolution_hours: float = Field(default=8760.0, ge=0)
+    include_categories: str = ""
+    exclude_categories: str = ""
+    category_weights_json: str = ""
+    watchlist_hysteresis_score: float = Field(default=0.05, ge=0.0, le=1.0)
+    watchlist_cooldown_seconds: float = Field(default=600.0, ge=0.0)
+    universe_mode: str = "auto"
+
     # --- Storage ---
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'salazar-trader.db'}"
 

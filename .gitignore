@@ -27,7 +27,7 @@ wheels/
 
 *.db
 *.sqlite3
-data/
+/data/
 model_artifacts/
 
 .venv/

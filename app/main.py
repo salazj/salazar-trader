@@ -27,6 +27,7 @@ from app.exchanges import build_exchange_adapter
 from app.exchanges.base import BaseExchangeAdapter
 from app.execution.engine import ExecutionEngine
 from app.monitoring import get_logger, setup_logging
+from app.universe.manager import UniverseManager
 from app.monitoring.health import HealthServer
 from app.monitoring.logger import metrics
 from app.news.ingestion import NewsIngestionService
@@ -114,6 +115,9 @@ class TradingBot:
         self._news_service.set_market_provider(lambda: self._active_markets)
         self._setup_nlp_providers()
 
+        # Universe selection (upstream from strategy execution)
+        self._universe = UniverseManager(self._settings, self._adapter.market_data)
+
         # Health endpoint
         self._health_server = HealthServer(
             portfolio_snapshot_fn=self._portfolio.get_snapshot,
@@ -182,35 +186,22 @@ class TradingBot:
 
         await self._repository.initialize()
 
-        # Fetch markets via exchange adapter
-        all_markets = await self._adapter.market_data.get_all_markets()
-        if market_slugs:
-            self._active_markets = [m for m in all_markets if m.slug in market_slugs]
-        else:
-            self._active_markets = [m for m in all_markets if m.active][:5]
+        # Strategic market-universe selection
+        self._active_markets = await self._universe.initial_selection(
+            market_slugs=market_slugs,
+        )
 
         if not self._active_markets:
             logger.error("no_active_markets_found")
             return
 
-        # Build instrument mapping and feature engines
-        instrument_ids: list[str] = []
-        for market in self._active_markets:
-            await self._repository.save_market(market)
-            for token in market.tokens:
-                iid = token.instrument_id or token.token_id
-                instrument_ids.append(iid)
-                self._instrument_to_market[iid] = market
-                self._feature_engines[iid] = FeatureEngine(
-                    market.market_id,
-                    instrument_id=iid,
-                    exchange=self._settings.exchange,
-                )
+        instrument_ids = await self._setup_market_instruments(self._active_markets)
 
         logger.info(
             "markets_loaded",
             count=len(self._active_markets),
             instruments=len(instrument_ids),
+            watchlist_stats=self._universe.stats,
         )
 
         # Fetch initial orderbook snapshots via REST
@@ -249,12 +240,14 @@ class TradingBot:
             ws.connect(),
             self._intelligence_loop(),
             self._housekeeping_loop(),
+            self._universe_refresh_loop(),
             self._news_service.start(),
         )
 
     async def stop(self) -> None:
         logger.info("bot_stopping")
         self._running = False
+        self._universe.stop()
         await self._news_service.stop()
         await self._health_server.stop()
         await self._execution.cancel_all_orders()
@@ -266,6 +259,80 @@ class TradingBot:
         )
         logger.info("bot_stopped", **{k: v for k, v in summary.items() if k != "positions"})
         await self._repository.close()
+
+    async def _setup_market_instruments(self, markets: list[Market]) -> list[str]:
+        """Register markets: save to DB, build instrument mapping and feature engines."""
+        instrument_ids: list[str] = []
+        for market in markets:
+            await self._repository.save_market(market)
+            for token in market.tokens:
+                iid = token.instrument_id or token.token_id
+                if iid not in self._instrument_to_market:
+                    instrument_ids.append(iid)
+                    self._instrument_to_market[iid] = market
+                    self._feature_engines[iid] = FeatureEngine(
+                        market.market_id,
+                        instrument_id=iid,
+                        exchange=self._settings.exchange,
+                    )
+        return instrument_ids
+
+    async def _universe_refresh_loop(self) -> None:
+        """Periodically re-evaluate the market universe and rotate the watchlist."""
+        while self._running:
+            await asyncio.sleep(float(self._settings.universe_refresh_seconds))
+            if not self._running:
+                break
+
+            try:
+                books = {}
+                for iid in self._orderbook.instruments:
+                    snap = self._orderbook.get_snapshot(iid)
+                    if snap is not None:
+                        market = self._instrument_to_market.get(iid)
+                        if market:
+                            books[market.market_id] = snap
+
+                summary = await self._universe.refresh(books=books)
+
+                new_markets = self._universe.active_markets
+                current_ids = {m.market_id for m in self._active_markets}
+                new_ids = {m.market_id for m in new_markets}
+
+                added_markets = [m for m in new_markets if m.market_id not in current_ids]
+                removed_ids = current_ids - new_ids
+
+                if added_markets:
+                    new_instrument_ids = await self._setup_market_instruments(added_markets)
+                    if new_instrument_ids:
+                        ws = self._adapter.websocket
+                        ws.subscribe_book(new_instrument_ids)
+                        ws.subscribe_trades(new_instrument_ids)
+                        for iid in new_instrument_ids:
+                            try:
+                                book_data = await self._adapter.market_data.get_orderbook(iid)
+                                market = self._instrument_to_market[iid]
+                                self._orderbook.apply_snapshot(
+                                    market_id=market.market_id,
+                                    instrument_id=iid,
+                                    bids=book_data.get("bids", []),
+                                    asks=book_data.get("asks", []),
+                                )
+                            except Exception as e:
+                                logger.warning("refresh_book_fetch_failed", instrument_id=iid, error=str(e))
+
+                self._active_markets = new_markets
+
+                logger.info(
+                    "universe_refresh_applied",
+                    active_markets=len(self._active_markets),
+                    added=len(added_markets),
+                    removed=len(removed_ids),
+                    watchlist_stats=self._universe.stats,
+                )
+
+            except Exception as e:
+                logger.error("universe_refresh_error", error=str(e))
 
     async def _persist_positions(self) -> None:
         try:
@@ -587,7 +654,7 @@ class TradingBot:
 
 
 @click.command()
-@click.option("--markets", "-m", multiple=True, help="Market slugs to trade (default: top 5 active)")
+@click.option("--markets", "-m", multiple=True, help="Market slugs to trade (default: dynamic universe selection)")
 @click.option("--strategy", "-s", default=None, help="Strategy name override")
 @click.option("--dry-run/--live", default=True, help="Dry run (default) or live trading")
 @click.option("--exchange", "-e", default=None, help="Exchange: polymarket or kalshi")
