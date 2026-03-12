@@ -278,17 +278,20 @@ class TradingBot:
             watchlist_stats=self._universe.stats,
         )
 
-        # Fetch initial orderbook snapshots via REST
+        # Fetch initial orderbook snapshots via REST (only overwrite if API returns data)
         for iid in instrument_ids:
             try:
                 book_data = await self._adapter.market_data.get_orderbook(iid)
-                market = self._instrument_to_market[iid]
-                self._orderbook.apply_snapshot(
-                    market_id=market.market_id,
-                    instrument_id=iid,
-                    bids=book_data.get("bids", []),
-                    asks=book_data.get("asks", []),
-                )
+                bids = book_data.get("bids", [])
+                asks = book_data.get("asks", [])
+                if bids or asks:
+                    market = self._instrument_to_market[iid]
+                    self._orderbook.apply_snapshot(
+                        market_id=market.market_id,
+                        instrument_id=iid,
+                        bids=bids,
+                        asks=asks,
+                    )
             except Exception as e:
                 logger.warning("initial_book_fetch_failed", instrument_id=iid, error=str(e))
 
@@ -520,13 +523,16 @@ class TradingBot:
                         for iid in new_instrument_ids:
                             try:
                                 book_data = await self._adapter.market_data.get_orderbook(iid)
-                                market = self._instrument_to_market[iid]
-                                self._orderbook.apply_snapshot(
-                                    market_id=market.market_id,
-                                    instrument_id=iid,
-                                    bids=book_data.get("bids", []),
-                                    asks=book_data.get("asks", []),
-                                )
+                                bids = book_data.get("bids", [])
+                                asks = book_data.get("asks", [])
+                                if bids or asks:
+                                    market = self._instrument_to_market[iid]
+                                    self._orderbook.apply_snapshot(
+                                        market_id=market.market_id,
+                                        instrument_id=iid,
+                                        bids=bids,
+                                        asks=asks,
+                                    )
                             except Exception as e:
                                 logger.warning("refresh_book_fetch_failed", instrument_id=iid, error=str(e))
 
