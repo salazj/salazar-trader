@@ -143,6 +143,9 @@ export interface ServiceStats {
   api_calls: number;
   errors: number;
   estimated_cost: number;
+  estimated_saved: number;
+  skipped_cost_gate: number;
+  cache_hits: number;
   balance: number | null;
   balance_label: string | null;
   last_call_at: string | null;

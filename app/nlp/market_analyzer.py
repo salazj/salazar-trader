@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -25,6 +26,76 @@ from app.nlp.signals import NlpSignal, SentimentDirection
 from app.utils.helpers import utc_now
 
 logger = get_logger(__name__)
+
+
+# ── Analysis cache ──────────────────────────────────────────────────────
+
+@dataclass
+class _CachedResult:
+    analysis: MarketAnalysis | None
+    price_at_analysis: float
+    timestamp: float  # monotonic
+
+
+class AnalysisCache:
+    """Skip re-analyzing markets whose price hasn't moved significantly."""
+
+    def __init__(self, ttl: int = 600, price_threshold: float = 0.03) -> None:
+        self._ttl = ttl
+        self._price_threshold = price_threshold
+        self._store: dict[str, _CachedResult] = {}
+        self.hits: int = 0
+        self.misses: int = 0
+
+    def get(self, market_id: str, current_price: float) -> MarketAnalysis | None | bool:
+        """Return cached analysis, or False if cache miss / stale / price moved."""
+        entry = self._store.get(market_id)
+        if entry is None:
+            self.misses += 1
+            return False
+        if (time.monotonic() - entry.timestamp) > self._ttl:
+            self.misses += 1
+            return False
+        if abs(current_price - entry.price_at_analysis) > self._price_threshold:
+            self.misses += 1
+            return False
+        self.hits += 1
+        return entry.analysis
+
+    def put(self, market_id: str, price: float, analysis: MarketAnalysis | None) -> None:
+        self._store[market_id] = _CachedResult(
+            analysis=analysis,
+            price_at_analysis=price,
+            timestamp=time.monotonic(),
+        )
+
+    def evict_stale(self) -> None:
+        now = time.monotonic()
+        stale = [k for k, v in self._store.items() if (now - v.timestamp) > self._ttl * 2]
+        for k in stale:
+            del self._store[k]
+
+
+def _passes_cost_gate(
+    market: Market,
+    cost_per_call: float,
+    min_bet_size: float,
+    cost_multiplier: float,
+) -> bool:
+    """Only analyze a market if the expected trade is worth the API cost.
+
+    Rule: the position size must be large enough that a reasonable edge
+    (5%) would earn more than `cost_multiplier` times the API call cost.
+    Also enforces a hard minimum bet size.
+    """
+    ed = market.exchange_data or {}
+    price = ed.get("yes_price")
+    if price is None or price <= 0:
+        return False
+    reasonable_edge = 0.05
+    expected_profit = min_bet_size * reasonable_edge
+    min_profit_threshold = cost_per_call * cost_multiplier
+    return expected_profit >= min_profit_threshold
 
 
 @dataclass
@@ -113,11 +184,20 @@ class LLMMarketAnalyzer:
         timeout: int = 45,
         min_edge: float = 0.05,
         max_markets_per_cycle: int = 15,
+        min_bet_size: float = 3.0,
+        cost_multiplier: float = 10.0,
+        cache_ttl: int = 600,
+        cache_price_threshold: float = 0.03,
     ) -> None:
         self._model = model
         self._min_edge = min_edge
         self._max_markets = max_markets_per_cycle
+        self._min_bet_size = min_bet_size
+        self._cost_multiplier = cost_multiplier
+        self.cache = AnalysisCache(ttl=cache_ttl, price_threshold=cache_price_threshold)
         self.api_calls: int = 0
+        self.skipped_cost_gate: int = 0
+        self.cache_hits: int = 0
         self.errors: int = 0
         self.last_call_at: str | None = None
         self.historical_calls: int = 0
@@ -147,6 +227,7 @@ class LLMMarketAnalyzer:
     def get_stats(self) -> dict[str, Any]:
         total_calls = self.historical_calls + self.api_calls
         total_cost = self.historical_cost + round(self.api_calls * self.COST_PER_CALL, 4)
+        saved = round((self.cache_hits + self.skipped_cost_gate) * self.COST_PER_CALL, 4)
         return {
             "api_calls": total_calls,
             "errors": self.errors,
@@ -154,6 +235,9 @@ class LLMMarketAnalyzer:
             "session_calls": self.api_calls,
             "session_cost": round(self.api_calls * self.COST_PER_CALL, 4),
             "last_call_at": self.last_call_at,
+            "skipped_cost_gate": self.skipped_cost_gate,
+            "cache_hits": self.cache_hits,
+            "estimated_saved": saved,
         }
 
     def get_cost_delta(self) -> tuple[int, int, float]:
@@ -174,10 +258,30 @@ class LLMMarketAnalyzer:
         headlines = news_headlines or []
 
         candidates = self._select_candidates(markets)
+        self.cache.evict_stale()
 
         for market in candidates:
+            ed = market.exchange_data or {}
+            yes_price = ed.get("yes_price", 0)
+
+            if not _passes_cost_gate(
+                market, self.COST_PER_CALL, self._min_bet_size, self._cost_multiplier
+            ):
+                self.skipped_cost_gate += 1
+                continue
+
+            cached = self.cache.get(market.market_id, yes_price)
+            if cached is not False:
+                self.cache_hits += 1
+                if cached and cached.direction != "hold":
+                    sig = self._analysis_to_signal(cached, market)
+                    if sig:
+                        signals.append(sig)
+                continue
+
             try:
                 analysis = await self._analyze_single(market, headlines)
+                self.cache.put(market.market_id, yes_price, analysis)
                 if analysis and analysis.direction != "hold":
                     sig = self._analysis_to_signal(analysis, market)
                     if sig:
@@ -192,6 +296,8 @@ class LLMMarketAnalyzer:
             "llm_market_analysis_complete",
             markets_analyzed=len(candidates),
             signals_generated=len(signals),
+            skipped_cost_gate=self.skipped_cost_gate,
+            cache_hits=self.cache.hits,
         )
         return signals
 
@@ -353,11 +459,20 @@ class ClaudeMarketAnalyzer:
         timeout: int = 45,
         min_edge: float = 0.05,
         max_markets_per_cycle: int = 15,
+        min_bet_size: float = 3.0,
+        cost_multiplier: float = 10.0,
+        cache_ttl: int = 600,
+        cache_price_threshold: float = 0.03,
     ) -> None:
         self._model = model
         self._min_edge = min_edge
         self._max_markets = max_markets_per_cycle
+        self._min_bet_size = min_bet_size
+        self._cost_multiplier = cost_multiplier
+        self.cache = AnalysisCache(ttl=cache_ttl, price_threshold=cache_price_threshold)
         self.api_calls: int = 0
+        self.skipped_cost_gate: int = 0
+        self.cache_hits: int = 0
         self.errors: int = 0
         self.last_call_at: str | None = None
         self.historical_calls: int = 0
@@ -387,6 +502,7 @@ class ClaudeMarketAnalyzer:
     def get_stats(self) -> dict[str, Any]:
         total_calls = self.historical_calls + self.api_calls
         total_cost = self.historical_cost + round(self.api_calls * self.COST_PER_CALL, 4)
+        saved = round((self.cache_hits + self.skipped_cost_gate) * self.COST_PER_CALL, 4)
         return {
             "api_calls": total_calls,
             "errors": self.errors,
@@ -394,6 +510,9 @@ class ClaudeMarketAnalyzer:
             "session_calls": self.api_calls,
             "session_cost": round(self.api_calls * self.COST_PER_CALL, 4),
             "last_call_at": self.last_call_at,
+            "skipped_cost_gate": self.skipped_cost_gate,
+            "cache_hits": self.cache_hits,
+            "estimated_saved": saved,
         }
 
     def get_cost_delta(self) -> tuple[int, int, float]:
@@ -412,10 +531,30 @@ class ClaudeMarketAnalyzer:
         headlines = news_headlines or []
 
         candidates = self._select_candidates(markets)
+        self.cache.evict_stale()
 
         for market in candidates:
+            ed = market.exchange_data or {}
+            yes_price = ed.get("yes_price", 0)
+
+            if not _passes_cost_gate(
+                market, self.COST_PER_CALL, self._min_bet_size, self._cost_multiplier
+            ):
+                self.skipped_cost_gate += 1
+                continue
+
+            cached = self.cache.get(market.market_id, yes_price)
+            if cached is not False:
+                self.cache_hits += 1
+                if cached and cached.direction != "hold":
+                    sig = self._analysis_to_signal(cached, market)
+                    if sig:
+                        signals.append(sig)
+                continue
+
             try:
                 analysis = await self._analyze_single(market, headlines)
+                self.cache.put(market.market_id, yes_price, analysis)
                 if analysis and analysis.direction != "hold":
                     sig = self._analysis_to_signal(analysis, market)
                     if sig:
@@ -430,6 +569,8 @@ class ClaudeMarketAnalyzer:
             "claude_market_analysis_complete",
             markets_analyzed=len(candidates),
             signals_generated=len(signals),
+            skipped_cost_gate=self.skipped_cost_gate,
+            cache_hits=self.cache.hits,
         )
         return signals
 

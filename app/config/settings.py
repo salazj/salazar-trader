@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     stop_loss_pct: float = Field(default=0.50, ge=0.0, le=1.0)
     stop_loss_check_interval: int = Field(default=30, ge=10)
 
+    # --- LLM Cost Control ---
+    llm_min_bet_size: float = Field(default=3.0, ge=0.0)
+    llm_cost_multiplier: float = Field(default=10.0, ge=1.0)
+    llm_cache_ttl: int = Field(default=600, ge=60)
+    llm_cache_price_threshold: float = Field(default=0.03, ge=0.001, le=0.20)
+
     # --- Strategy ---
     strategy: str = "passive_market_maker"
     default_order_size: float = Field(default=1.0, ge=0.01)

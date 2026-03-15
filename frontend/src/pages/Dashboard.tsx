@@ -556,12 +556,19 @@ export default function Dashboard() {
                     )}
                   </div>
                 </div>
-                {/* LLM detail row: calls + balance check link */}
-                {svc.type === "llm" && svc.api_calls > 0 && (
-                  <div className="flex items-center justify-between mt-1.5 text-[11px] text-muted-foreground">
-                    <span className="tabular-nums">{svc.api_calls} total API calls</span>
+                {/* LLM detail row: calls + savings + balance check link */}
+                {svc.type === "llm" && (svc.api_calls > 0 || svc.cache_hits > 0 || svc.skipped_cost_gate > 0) && (
+                  <div className="mt-1.5 space-y-0.5">
+                    <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                      <span className="tabular-nums">{svc.api_calls} API calls</span>
+                      {(svc.cache_hits > 0 || svc.skipped_cost_gate > 0) && (
+                        <span className="tabular-nums text-emerald-400">
+                          {svc.cache_hits + svc.skipped_cost_gate} skipped &middot; ~${svc.estimated_saved.toFixed(2)} saved
+                        </span>
+                      )}
+                    </div>
                     {svc.balance_label && (
-                      <span className="text-[10px] opacity-70">{svc.balance_label}</span>
+                      <div className="text-[10px] text-muted-foreground/60">{svc.balance_label}</div>
                     )}
                   </div>
                 )}

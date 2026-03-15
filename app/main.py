@@ -143,6 +143,10 @@ class TradingBot:
                 timeout=self._settings.llm_timeout_seconds,
                 min_edge=0.05,
                 max_markets_per_cycle=15,
+                min_bet_size=self._settings.llm_min_bet_size,
+                cost_multiplier=self._settings.llm_cost_multiplier,
+                cache_ttl=self._settings.llm_cache_ttl,
+                cache_price_threshold=self._settings.llm_cache_price_threshold,
             )
             logger.info(
                 "llm_market_analyzer_enabled",
@@ -156,6 +160,10 @@ class TradingBot:
                 timeout=self._settings.llm_timeout_seconds,
                 min_edge=0.05,
                 max_markets_per_cycle=15,
+                min_bet_size=self._settings.llm_min_bet_size,
+                cost_multiplier=self._settings.llm_cost_multiplier,
+                cache_ttl=self._settings.llm_cache_ttl,
+                cache_price_threshold=self._settings.llm_cache_price_threshold,
             )
             logger.info(
                 "claude_market_analyzer_enabled",
@@ -227,6 +235,9 @@ class TradingBot:
             "api_calls": gpt_stats.get("api_calls", 0),
             "errors": gpt_stats.get("errors", 0),
             "estimated_cost": gpt_stats.get("estimated_cost", 0.0),
+            "estimated_saved": gpt_stats.get("estimated_saved", 0.0),
+            "skipped_cost_gate": gpt_stats.get("skipped_cost_gate", 0),
+            "cache_hits": gpt_stats.get("cache_hits", 0),
             "balance": None,
             "balance_label": "Check platform.openai.com",
             "last_call_at": gpt_stats.get("last_call_at"),
@@ -245,6 +256,9 @@ class TradingBot:
             "api_calls": claude_stats.get("api_calls", 0),
             "errors": claude_stats.get("errors", 0),
             "estimated_cost": claude_stats.get("estimated_cost", 0.0),
+            "estimated_saved": claude_stats.get("estimated_saved", 0.0),
+            "skipped_cost_gate": claude_stats.get("skipped_cost_gate", 0),
+            "cache_hits": claude_stats.get("cache_hits", 0),
             "balance": None,
             "balance_label": "Check console.anthropic.com",
             "last_call_at": claude_stats.get("last_call_at"),

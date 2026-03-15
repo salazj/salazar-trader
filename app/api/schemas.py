@@ -201,6 +201,9 @@ class ServiceStatsItem(BaseModel):
     api_calls: int = 0
     errors: int = 0
     estimated_cost: float = 0.0
+    estimated_saved: float = 0.0
+    skipped_cost_gate: int = 0
+    cache_hits: int = 0
     balance: float | None = None
     balance_label: str | None = None
     last_call_at: str | None = None
