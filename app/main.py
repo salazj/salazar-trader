@@ -330,8 +330,16 @@ class TradingBot:
     def _init_equities(self) -> None:
         """Set up all equities-specific components."""
         from app.brokers import build_broker_adapter
+        from app.llm import LocalLLMService
+        from app.regime.detector import MarketRegimeDetector
+        from app.stocks.decision import (
+            DecisionStore,
+            PerformanceTracker,
+            StockDecisionEngine,
+        )
         from app.stocks.execution import StockExecutionEngine
         from app.stocks.features import StockFeatureEngine
+        from app.stocks.ml import StockMLPredictor
         from app.stocks.risk import StockRiskManager
         from app.stocks.strategies import ALL_STOCK_STRATEGIES
         from app.stocks.universe import StockUniverseManager
@@ -348,6 +356,21 @@ class TradingBot:
         self._stock_strategies = [cls() for cls in ALL_STOCK_STRATEGIES]
         self._stock_feature_engines: dict[str, StockFeatureEngine] = {}
         self._active_markets: list[Market] = []
+
+        # Three-layer decision support.
+        self._stock_decision_engine = StockDecisionEngine(
+            self._settings, risk_manager=self._stock_risk
+        )
+        self._stock_decision_store = DecisionStore()
+        self._stock_performance = PerformanceTracker()
+        self._stock_regime = MarketRegimeDetector(
+            lookback=self._settings.regime_lookback_bars,
+        )
+        self._stock_ml = StockMLPredictor.load(self._settings.stock_ml_model_path)
+        self._stock_llm_service = LocalLLMService(self._settings)
+
+        # Per-symbol news context cache for the LLM (latest headline string).
+        self._stock_news_context: dict[str, str] = {}
 
         self._health_server = HealthServer(
             portfolio_snapshot_fn=self._portfolio.get_snapshot,
@@ -651,8 +674,38 @@ class TradingBot:
         await self._repository.close()
         logger.info("bot_stopped_equities")
 
+    def _build_tech_context(self, features) -> str:
+        """Compact indicator summary used in the LLM prompt."""
+        return (
+            f"price={features.last_price:.2f} vwap={features.vwap:.2f} "
+            f"dist_vwap={features.distance_from_vwap_pct:+.2f}% "
+            f"ema9={features.ema_9:.2f} ema21={features.ema_21:.2f} "
+            f"ema50={features.ema_50:.2f} rsi={features.rsi_14:.1f} "
+            f"macd_hist={features.macd_hist:+.3f} atr={features.atr_14:.2f} "
+            f"vol_surge={features.volume_surge_ratio:.2f} "
+            f"trend={features.trend_strength:+.2f}"
+        )
+
     async def _stock_intelligence_loop(self) -> None:
-        """Main loop for equities trading."""
+        """Main loop for equities trading.
+
+        Runs the full three-layer decision pipeline per symbol per tick:
+
+            L1 strategies → L2 ML probability → L3 LLM verdict
+                                 │
+                                 ▼
+                       StockDecisionEngine.evaluate
+                                 │
+                                 ▼
+                  Risk manager (deterministic gate)
+                                 │
+                                 ▼
+                       StockExecutionEngine
+
+        Every evaluation produces a ``StockDecisionTrace`` stored in the
+        decision store so the GUI can show what was decided and why,
+        even when a trade was blocked.
+        """
         while self._running:
             await asyncio.sleep(5.0)
 
@@ -662,6 +715,25 @@ class TradingBot:
 
             if not self._settings.allow_extended_hours and not self._broker.is_market_open():
                 continue
+
+            # Refresh regime from latest SPY/QQQ closes (best-effort).
+            spy_atr_pct = 0.0
+            for sym in ("SPY", "QQQ"):
+                fe = self._stock_feature_engines.get(sym)
+                if fe is None:
+                    continue
+                try:
+                    f = fe.compute()
+                    self._stock_regime.update_close(sym, f.last_price)
+                    if sym == "SPY" and f.last_price > 0:
+                        spy_atr_pct = f.atr_14 / f.last_price
+                except Exception:
+                    continue
+            try:
+                self._stock_regime.evaluate(atr_pct=spy_atr_pct)
+            except Exception:
+                pass
+            regime = self._stock_regime.last
 
             for symbol, engine in self._stock_feature_engines.items():
                 try:
@@ -675,15 +747,61 @@ class TradingBot:
                     features = engine.compute()
                     portfolio_snap = self._portfolio.get_snapshot()
 
+                    # L1 — pick the highest-confidence strategy signal.
+                    best_signal = None
+                    best_conf = -1.0
                     for strat in self._stock_strategies:
                         try:
                             sig = strat.generate_signal(features, portfolio_snap)
-                            if sig is not None and sig.action.value != "HOLD":
-                                await self._stock_execution.process_signal(
-                                    sig, features, portfolio_snap, broker=self._broker
-                                )
                         except Exception:
                             logger.exception("stock_strategy_error", strategy=strat.name)
+                            continue
+                        if sig is None or sig.action.value == "HOLD":
+                            continue
+                        if sig.confidence > best_conf:
+                            best_conf = sig.confidence
+                            best_signal = sig
+                    if best_signal is None:
+                        continue
+
+                    # L2 — ML probability of upward move.
+                    ml_pred = self._stock_ml.predict(features)
+
+                    # L3 — local LLM verdict (always a valid object).
+                    news_ctx = self._stock_news_context.get(symbol.upper(), "")
+                    try:
+                        from app.llm.service import LLMRequest
+                        llm_verdict = await self._stock_llm_service.evaluate(
+                            LLMRequest(
+                                ticker=symbol,
+                                technical_context=self._build_tech_context(features),
+                                news_context=news_ctx,
+                            )
+                        )
+                    except Exception:
+                        from app.llm.schema import safe_default_verdict
+                        llm_verdict = safe_default_verdict(symbol, "llm exception")
+
+                    # Three-layer decision + deterministic risk gate.
+                    trace = self._stock_decision_engine.evaluate(
+                        ticker=symbol,
+                        features=features,
+                        portfolio=portfolio_snap,
+                        l1_signal=best_signal,
+                        ml_prediction=ml_pred,
+                        llm_verdict=llm_verdict,
+                        regime=regime,
+                        broker=self._broker,
+                    )
+                    self._stock_decision_store.add(trace)
+
+                    if trace.action.value in {"buy", "sell"}:
+                        await self._stock_execution.process_signal(
+                            best_signal,
+                            features,
+                            portfolio_snap,
+                            broker=self._broker,
+                        )
 
                 except Exception as exc:
                     logger.error("stock_loop_error", symbol=symbol, error=str(exc))

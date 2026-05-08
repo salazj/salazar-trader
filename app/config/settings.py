@@ -179,6 +179,9 @@ class Settings(BaseSettings):
     # --- Stock Universe Selection ---
     stock_universe_mode: str = "manual"
     stock_tickers: str = ""
+    # Approved ticker allow-list — risk manager refuses anything outside this set.
+    # Defaults to highly-liquid large-caps suitable for Alpaca paper trading.
+    approved_stock_tickers: str = "SPY,QQQ,AAPL,MSFT,NVDA,TSLA,AMD,META,AMZN,GOOGL"
     stock_min_volume: int = 100000
     stock_min_price: float = 5.0
     stock_max_price: float = 500.0
@@ -186,12 +189,50 @@ class Settings(BaseSettings):
     max_stock_symbols: int = 20
     allow_extended_hours: bool = False
 
-    # --- Stock Risk Limits ---
-    stock_max_position_dollars: float = Field(default=1000.0, ge=0)
-    stock_max_portfolio_dollars: float = Field(default=10000.0, ge=0)
-    stock_max_daily_loss_dollars: float = Field(default=500.0, ge=0)
-    stock_max_open_positions: int = Field(default=10, ge=1)
-    stock_max_orders_per_minute: int = Field(default=10, ge=1)
+    # --- Stock Risk Limits (beginner-safe Jetson defaults) ---
+    # NOTE: defaults are deliberately tiny ($50/position, $250 portfolio,
+    # $25 daily loss, 3 open positions, 5 trades/day). Override via env for
+    # larger accounts.
+    stock_max_position_dollars: float = Field(default=50.0, ge=0)
+    stock_max_portfolio_dollars: float = Field(default=250.0, ge=0)
+    stock_max_daily_loss_dollars: float = Field(default=25.0, ge=0)
+    stock_max_open_positions: int = Field(default=3, ge=1)
+    stock_max_orders_per_minute: int = Field(default=3, ge=1)
+    stock_max_trades_per_day: int = Field(default=5, ge=1)
+    stock_require_stop_loss: bool = True
+    # Revenge-trading guard: block new entries on the same symbol after N
+    # consecutive losing exits within a session.
+    stock_max_consecutive_losses_per_symbol: int = Field(default=2, ge=1)
+    # Maximum bar age (seconds) tolerated by risk manager — blocks stale data.
+    stock_max_bar_age_seconds: int = Field(default=120, ge=10)
+
+    # --- Three-layer decision weights for stock trading ---
+    stock_l1_weight: float = Field(default=0.50, ge=0.0, le=1.0)
+    stock_l2_weight: float = Field(default=0.30, ge=0.0, le=1.0)
+    stock_l3_weight: float = Field(default=0.20, ge=0.0, le=1.0)
+    # Final-score threshold below which trades are blocked.
+    stock_min_final_score: float = Field(default=0.55, ge=0.0, le=1.0)
+
+    # --- Local LLM (Jetson Orin Nano oriented) ---
+    # Provider: "none", "llama_cpp", "ollama", "hosted_api" (compat shim)
+    local_llm_provider: str = "none"
+    # Used by llama_cpp provider — path to a quantized GGUF file.
+    local_llm_model_path: str = "models/qwen2.5-3b-instruct-q4.gguf"
+    # Used by ollama provider — model tag.
+    local_llm_model_name: str = "qwen2.5:3b-instruct-q4_K_M"
+    local_llm_endpoint: str = "http://127.0.0.1:11434"
+    local_llm_context_size: int = Field(default=2048, ge=512)
+    local_llm_threads: int = Field(default=4, ge=1)
+    local_llm_gpu_layers: int = Field(default=20, ge=0)
+    local_llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    local_llm_max_tokens: int = Field(default=512, ge=16)
+    local_llm_timeout_seconds: float = Field(default=20.0, ge=1.0)
+    local_llm_cache_ttl_seconds: int = Field(default=1800, ge=30)
+
+    # --- Stock ML / regime ---
+    stock_ml_model_path: str = "model_artifacts/stock_xgb_v1.pkl"
+    stock_ml_min_samples: int = Field(default=200, ge=50)
+    regime_lookback_bars: int = Field(default=60, ge=10)
 
     # --- Storage ---
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'salazar-trader.db'}"
@@ -301,6 +342,21 @@ class Settings(BaseSettings):
         return bool(self.alpaca_api_key and self.alpaca_secret_key)
 
     @property
+    def approved_ticker_set(self) -> set[str]:
+        """Set of upper-cased approved tickers from ``approved_stock_tickers``."""
+        return {
+            t.strip().upper()
+            for t in self.approved_stock_tickers.split(",")
+            if t.strip()
+        }
+
+    def is_ticker_approved(self, symbol: str) -> bool:
+        approved = self.approved_ticker_set
+        if not approved:
+            return True
+        return symbol.upper() in approved
+
+    @property
     def has_credentials(self) -> bool:
         if self.asset_class == "equities":
             return self.has_alpaca_credentials
@@ -339,17 +395,22 @@ class Settings(BaseSettings):
         self.require_live_trading()
 
     def __repr__(self) -> str:
-        """Override repr to redact secrets — omits secret fields entirely."""
+        """Override repr to redact secrets — replaces secret values with ``***``."""
         _SECRETS = {
             "private_key", "poly_api_key", "poly_api_secret", "poly_passphrase",
             "llm_api_key", "kalshi_api_key", "kalshi_private_key", "kalshi_private_key_path",
             "newsapi_key", "alpaca_api_key", "alpaca_secret_key",
+            "claude_api_key", "finnhub_api_key", "betstack_api_key",
         }
-        safe_fields = {
-            k: v
-            for k, v in self.__dict__.items()
-            if not k.startswith("_") and k not in _SECRETS
-        }
+        safe_fields = {}
+        for k, v in self.__dict__.items():
+            if k.startswith("_"):
+                continue
+            if k in _SECRETS:
+                if v:
+                    safe_fields[k] = "***"
+                continue
+            safe_fields[k] = v
         return f"Settings({safe_fields})"
 
     def ensure_dirs(self) -> None:

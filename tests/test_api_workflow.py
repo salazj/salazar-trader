@@ -257,8 +257,13 @@ class TestRiskWhenStopped:
         assert resp.status_code == 409
 
     def test_emergency_stop_when_stopped(self, client):
-        resp = client.post("/api/risk/emergency-stop")
+        # Emergency stop now requires confirm=true (Jetson safety).
+        resp = client.post("/api/risk/emergency-stop", json={"confirm": True})
         assert resp.status_code == 409
+
+    def test_emergency_stop_requires_confirm(self, client):
+        resp = client.post("/api/risk/emergency-stop")
+        assert resp.status_code == 400
 
 
 # ── REST logs ─────────────────────────────────────────────────────
