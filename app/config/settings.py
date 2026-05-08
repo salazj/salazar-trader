@@ -226,7 +226,7 @@ class Settings(BaseSettings):
     local_llm_gpu_layers: int = Field(default=20, ge=0)
     local_llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     local_llm_max_tokens: int = Field(default=512, ge=16)
-    local_llm_timeout_seconds: float = Field(default=20.0, ge=1.0)
+    local_llm_timeout_seconds: float = Field(default=20.0, ge=0.05)
     local_llm_cache_ttl_seconds: int = Field(default=1800, ge=30)
 
     # --- Stock ML / regime ---

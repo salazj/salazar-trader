@@ -313,22 +313,10 @@ class StockBacktestEngine:
                 "entry_time": ts,
                 "stop": signal.stop_price,
                 "rationale": signal.rationale,
+                "strategy": signal.strategy_name,
             }
             cash_state["cash"] = cash
-            trades.append(
-                StockTrade(
-                    symbol=sym,
-                    side="long_entry",
-                    entry_time=ts.isoformat(),
-                    entry_price=entry_price,
-                    exit_time=None,
-                    exit_price=None,
-                    quantity=qty,
-                    pnl=0.0,
-                    strategy=signal.strategy_name,
-                    rationale=signal.rationale,
-                )
-            )
+            # Round-trip trade is recorded only on close (or forced close).
 
         elif action == "SELL" and sym in positions:
             pos = positions.pop(sym)
