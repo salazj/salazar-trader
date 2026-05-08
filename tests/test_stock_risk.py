@@ -29,18 +29,26 @@ def _make_portfolio(**overrides) -> PortfolioSnapshot:
 class TestStockRiskManager:
     def test_approve_normal_order(self):
         rm = StockRiskManager(_make_settings())
-        result = rm.check_order("AAPL", "buy", 150.0, 5, _make_portfolio())
+        result = rm.check_order(
+            "AAPL", "buy", 150.0, 5, _make_portfolio(), stop_price=145.0,
+        )
         assert result.approved is True
 
     def test_reject_exceeds_position_limit(self):
         rm = StockRiskManager(_make_settings(stock_max_position_dollars=500.0))
-        result = rm.check_order("AAPL", "buy", 150.0, 10, _make_portfolio())
+        result = rm.check_order(
+            "AAPL", "buy", 150.0, 10, _make_portfolio(), stop_price=145.0,
+        )
         assert result.approved is False
         assert "max position" in result.reason.lower()
 
     def test_reject_exceeds_portfolio_limit(self):
         rm = StockRiskManager(_make_settings(stock_max_portfolio_dollars=100.0))
-        result = rm.check_order("AAPL", "buy", 150.0, 5, _make_portfolio(total_exposure=50.0))
+        result = rm.check_order(
+            "AAPL", "buy", 150.0, 5,
+            _make_portfolio(total_exposure=50.0),
+            stop_price=145.0,
+        )
         assert result.approved is False
         assert "portfolio" in result.reason.lower()
 
@@ -52,7 +60,7 @@ class TestStockRiskManager:
             Position(token_id="b", exchange="alpaca"),
         ]
         portfolio = PortfolioSnapshot(cash=10000.0, positions=positions)
-        result = rm.check_order("AAPL", "buy", 150.0, 1, portfolio)
+        result = rm.check_order("AAPL", "buy", 150.0, 1, portfolio, stop_price=145.0)
         assert result.approved is False
         assert "positions" in result.reason.lower()
 
@@ -60,7 +68,9 @@ class TestStockRiskManager:
         rm = StockRiskManager(_make_settings())
         rm.trip_circuit_breaker("Test halt")
         assert rm.is_halted is True
-        result = rm.check_order("AAPL", "buy", 150.0, 1, _make_portfolio())
+        result = rm.check_order(
+            "AAPL", "buy", 150.0, 1, _make_portfolio(), stop_price=145.0,
+        )
         assert result.approved is False
 
     def test_reset_circuit_breaker(self):
@@ -72,6 +82,8 @@ class TestStockRiskManager:
     def test_daily_loss_triggers_breaker(self):
         rm = StockRiskManager(_make_settings(stock_max_daily_loss_dollars=100.0))
         rm._daily_pnl = -200.0
-        result = rm.check_order("AAPL", "buy", 150.0, 1, _make_portfolio())
+        result = rm.check_order(
+            "AAPL", "buy", 150.0, 1, _make_portfolio(), stop_price=145.0,
+        )
         assert result.approved is False
         assert rm.is_halted is True

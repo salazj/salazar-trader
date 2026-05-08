@@ -59,6 +59,9 @@ def create_app() -> FastAPI:
     from app.api.routes.risk import router as risk_router
     from app.api.routes.exchanges import router as exchanges_router
     from app.api.routes.strategies import router as strategies_router
+    from app.api.routes.stock_decisions import router as decisions_router
+    from app.api.routes.llm import router as llm_router
+    from app.api.routes.backtests import router as backtests_router
 
     app.include_router(status_router)
     app.include_router(bot_router)
@@ -67,6 +70,9 @@ def create_app() -> FastAPI:
     app.include_router(risk_router)
     app.include_router(exchanges_router)
     app.include_router(strategies_router)
+    app.include_router(decisions_router)
+    app.include_router(llm_router)
+    app.include_router(backtests_router)
 
     # WebSocket routes
     from app.api.websocket.logs import router as ws_logs_router

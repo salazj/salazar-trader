@@ -50,6 +50,8 @@ class TestMomentumStrategy:
             ema_9=149.0,
             momentum_5m=0.01,
             rsi_14=55.0,
+            relative_volume=1.5,
+            volume_surge_ratio=1.5,
         )
         sig = strat.generate_signal(features, _make_portfolio())
         assert sig is not None

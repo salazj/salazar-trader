@@ -94,6 +94,8 @@ class StockExecutionEngine:
             quantity=quantity,
             portfolio=portfolio,
             broker=broker,
+            stop_price=signal.stop_price,
+            bar_timestamp=features.timestamp,
         )
         if not check.approved:
             logger.info(

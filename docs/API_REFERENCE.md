@@ -26,6 +26,26 @@ Base URL: `http://localhost:8000` (proxied through nginx at port 3000 in Docker)
 | `GET` | `/api/status` | Current bot session status |
 | `GET` | `/api/logs` | Fetch recent log entries |
 
+### Stock Decision Engine (Jetson)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/api/decisions/recent?limit=N` | Last N `StockDecisionTrace` items (newest first). Each has `l1_score`, `l2_score`, `l3_score`, `final_score`, `action` (`buy/sell/hold/blocked`), `risk_checks`, `blocked_reason`, `explanation`, `weights`, `regime`, `llm_sentiment`, `llm_should_gate`, `ml_probability_up`. |
+| `GET`  | `/api/regime/current` | Current market regime: `trending_bullish`, `trending_bearish`, `range_bound`, `high_volatility`, `low_volatility`, or `risk_off`. Includes `confidence`, `score`, `spy_trend`, `qqq_trend`, `atr_pct`, `vix`, `allows_long`. |
+| `GET`  | `/api/performance/summary` | Rolling PnL summary: total_trades, wins, losses, total_pnl, win_rate, average_win, average_loss, profit_factor, max_drawdown, sharpe, by_strategy. |
+| `GET`  | `/api/llm/status` | Local LLM provider info, call counters, cache stats. |
+| `POST` | `/api/llm/test` | Body: `{ticker, technical_context, news_context}`. Returns the validated `LLMVerdict`. |
+| `GET`  | `/api/backtests` | List recent backtest reports under `reports/`. |
+| `POST` | `/api/backtests/run` | Body: `{strategy, tickers, start, end, walk_forward, train_size, test_size, use_synthetic, …}`. |
+
+### Risk Controls
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/api/risk/status` | Current risk state (alias of `GET /api/risk`). |
+| `POST` | `/api/risk/emergency-stop` | Body: `{"confirm": true}` — required. |
+| `POST` | `/api/risk/reset-circuit-breaker` | Clear a tripped circuit breaker. |
+
 #### `GET /api/health`
 
 Returns platform health with version, session info, and subscriber count.
