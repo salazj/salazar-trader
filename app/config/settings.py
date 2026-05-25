@@ -177,6 +177,12 @@ class Settings(BaseSettings):
     universe_mode: str = "auto"
 
     # --- Stock Universe Selection ---
+    # Modes:
+    #   manual           — fixed list from STOCK_TICKERS
+    #   auto             — Alpaca catalog scan (legacy, weak filters)
+    #   news_driven      — STOCK_TICKERS core + hot tickers from news
+    #   top_movers       — STOCK_TICKERS core + Alpaca top movers
+    #   news_plus_movers — STOCK_TICKERS core + hot tickers + top movers
     stock_universe_mode: str = "manual"
     stock_tickers: str = ""
     # Approved ticker allow-list — risk manager refuses anything outside this set.
@@ -188,6 +194,21 @@ class Settings(BaseSettings):
     stock_sector_include: str = ""
     max_stock_symbols: int = 20
     allow_extended_hours: bool = False
+
+    # --- Dynamic Universe (news_driven / top_movers modes) ---
+    # Comma-separated candidate pool for the top-movers screener.
+    # Empty = use the built-in S&P 100 + liquid-ETF list.
+    stock_universe_candidates: str = ""
+    # How often (seconds) to re-run the dynamic universe selection.
+    stock_universe_refresh_seconds: int = Field(default=900, ge=60)
+    # Hot-ticker tracker parameters.
+    stock_hot_ticker_ttl_minutes: int = Field(default=120, ge=5)
+    stock_max_hot_tickers: int = Field(default=10, ge=0)
+    stock_hot_min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
+    stock_hot_min_relevance: float = Field(default=0.3, ge=0.0, le=1.0)
+    # Top-movers screener parameters.
+    stock_movers_top_n: int = Field(default=10, ge=0)
+    stock_movers_min_dollar_volume: float = Field(default=10_000_000.0, ge=0.0)
 
     # --- Stock Risk Limits (beginner-safe Jetson defaults) ---
     # NOTE: defaults are deliberately tiny ($50/position, $250 portfolio,

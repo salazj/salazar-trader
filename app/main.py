@@ -357,6 +357,11 @@ class TradingBot:
         self._stock_feature_engines: dict[str, StockFeatureEngine] = {}
         self._active_markets: list[Market] = []
 
+        # Hook the NLP pipeline so every classified headline updates the
+        # hot-ticker tracker (drives news_driven / news_plus_movers modes)
+        # and the per-symbol news context cache (consumed by the L3 LLM).
+        self._nlp_pipeline.add_classified_hook(self._on_news_classified)
+
         # Three-layer decision support.
         self._stock_decision_engine = StockDecisionEngine(
             self._settings, risk_manager=self._stock_risk
@@ -377,6 +382,25 @@ class TradingBot:
             is_halted_fn=lambda: self._stock_risk.is_halted,
             ws_connected_fn=lambda: self._broker.streaming.is_connected,
         )
+
+    def _on_news_classified(self, item, classification) -> None:
+        """NLP-pipeline hook: feed classified headlines into stock plumbing."""
+        if not self._is_equities:
+            return
+        tracker = getattr(self._stock_universe, "hot_tracker", None)
+        if tracker is None:
+            return
+        try:
+            touched = tracker.ingest(classification, item.text)
+        except Exception:
+            logger.exception("stock_news_ingest_failed")
+            return
+
+        for ticker in touched:
+            try:
+                self._stock_news_context[ticker] = item.text[:240]
+            except Exception:
+                continue
 
     def _build_nlp_pipeline(self) -> NlpPipeline:
         llm = build_llm_classifier(
@@ -659,12 +683,15 @@ class TradingBot:
         self._running = True
         self._portfolio.start_new_day()
 
-        await asyncio.gather(
+        tasks: list[asyncio.Task | Any] = [
             self._broker.streaming.connect(),
             self._stock_intelligence_loop(),
             self._stock_housekeeping_loop(),
             self._news_service.start(),
-        )
+        ]
+        if self._stock_universe.is_dynamic:
+            tasks.append(self._stock_universe_refresh_loop())
+        await asyncio.gather(*tasks)
 
     async def _stop_equities(self) -> None:
         await self._news_service.stop()
@@ -823,6 +850,62 @@ class TradingBot:
                 await self._repository.flush()
             except Exception as exc:
                 logger.error("stock_housekeeping_error", error=str(exc))
+
+    async def _stock_universe_refresh_loop(self) -> None:
+        """Periodically re-pick the active stock universe.
+
+        Only runs for dynamic modes (news_driven / top_movers / news_plus_movers).
+        Compares the new universe against the active feature engines; adds
+        engines for new tickers and removes engines for tickers that dropped
+        out (while preserving open positions — never auto-tears down a ticker
+        the portfolio still holds).
+        """
+        from app.stocks.features import StockFeatureEngine
+
+        interval = max(60.0, float(self._settings.stock_universe_refresh_seconds))
+        while self._running:
+            await asyncio.sleep(interval)
+            try:
+                new_symbols = await self._stock_universe.refresh()
+            except Exception as exc:
+                logger.warning("stock_universe_refresh_failed", error=str(exc))
+                continue
+
+            current = set(self._stock_feature_engines.keys())
+            target = set(new_symbols)
+
+            held: set[str] = set()
+            try:
+                snap = self._portfolio.get_snapshot()
+                for pos in snap.positions:
+                    if pos.size:
+                        held.add((pos.token_id or pos.instrument_id or "").upper())
+            except Exception:
+                pass
+
+            to_add = target - current
+            to_drop = (current - target) - held
+
+            for sym in sorted(to_add):
+                try:
+                    engine = StockFeatureEngine(sym)
+                    engine.start_new_day()
+                    self._stock_feature_engines[sym] = engine
+                except Exception:
+                    logger.exception("stock_feature_engine_add_failed", symbol=sym)
+
+            for sym in sorted(to_drop):
+                self._stock_feature_engines.pop(sym, None)
+                self._stock_news_context.pop(sym, None)
+
+            if to_add or to_drop:
+                logger.info(
+                    "stock_universe_diff_applied",
+                    added=sorted(to_add),
+                    dropped=sorted(to_drop),
+                    held_preserved=sorted(held & (current - target)),
+                    active=sorted(self._stock_feature_engines.keys()),
+                )
 
     async def _setup_market_instruments(self, markets: list[Market]) -> list[str]:
         """Register markets: save to DB, build instrument mapping and feature engines."""
