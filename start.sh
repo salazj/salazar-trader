@@ -129,8 +129,12 @@ ensure_ollama_native() {
   # Warm it up: load into memory and keep it resident (keep_alive=-1) so it
   # shows in `ollama ps`, has no cold-start latency, and is ready the moment
   # the bot classifies its first headline. (Empty prompt = load only.)
-  c_blue "==> Warming up '${model}' (loading into memory, keep-alive=always)..."
-  if curl -sf http://127.0.0.1:11434/api/generate \
+  if curl -sf http://127.0.0.1:11434/api/ps 2>/dev/null | grep -q "${model}"; then
+    c_green "==> '${model}' already loaded and resident (verify: ollama ps)."
+    return 0
+  fi
+  c_blue "==> Warming up '${model}' (loading into GPU memory — first load can take ~30s)..."
+  if curl -sf --max-time 180 http://127.0.0.1:11434/api/generate \
        -d "{\"model\":\"${model}\",\"keep_alive\":-1}" >/dev/null 2>&1; then
     c_green "==> '${model}' is loaded and resident (verify: ollama ps)."
   else
@@ -228,12 +232,16 @@ start_docker() {
   # no cold-start on the first headline). The ollama container's API is
   # published on the host at OLLAMA_PORT (default 11434).
   local oport; oport="$(env_val OLLAMA_PORT)"; oport="${oport:-11434}"
-  c_blue "==> Warming up '${model}' (loading into memory, keep-alive=always)..."
-  if curl -sf "http://127.0.0.1:${oport}/api/generate" \
-       -d "{\"model\":\"${model}\",\"keep_alive\":-1}" >/dev/null 2>&1; then
-    c_green "==> '${model}' is loaded and resident (verify: docker exec salazar-ollama ollama ps)."
+  if curl -sf "http://127.0.0.1:${oport}/api/ps" 2>/dev/null | grep -q "${model}"; then
+    c_green "==> '${model}' already loaded and resident (verify: docker exec salazar-ollama ollama ps)."
   else
-    c_red "    (warm-up request failed; model will load on first use instead)"
+    c_blue "==> Warming up '${model}' (loading into memory — first load can take ~30s)..."
+    if curl -sf --max-time 180 "http://127.0.0.1:${oport}/api/generate" \
+         -d "{\"model\":\"${model}\",\"keep_alive\":-1}" >/dev/null 2>&1; then
+      c_green "==> '${model}' is loaded and resident (verify: docker exec salazar-ollama ollama ps)."
+    else
+      c_red "    (warm-up request failed; model will load on first use instead)"
+    fi
   fi
 
   print_docker_urls
