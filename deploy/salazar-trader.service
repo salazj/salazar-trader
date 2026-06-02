@@ -1,7 +1,12 @@
 # systemd unit for running Salazar Trader 24/7 on a Jetson (or any Linux host).
 #
-# Install:
-#   1. Edit User / WorkingDirectory / ExecStart paths below if yours differ.
+# This runs the API + GUI server (python -m app.api). The dashboard is served
+# at http://<host>:8000 and trading is started/stopped from the dashboard
+# (the server does NOT autostart trading). After a reboot, open the dashboard
+# and press "Start" to resume trading.
+#
+# Install (the start.sh native path does this for you):
+#   1. Edit User / WorkingDirectory / paths below if yours differ.
 #   2. sudo cp deploy/salazar-trader.service /etc/systemd/system/
 #   3. sudo systemctl daemon-reload
 #   4. sudo systemctl enable --now salazar-trader
@@ -11,7 +16,7 @@
 # official install script sets up automatically. The unit waits for it.
 
 [Unit]
-Description=Salazar Trader (equities, Alpaca paper, local phi3)
+Description=Salazar Trader API + GUI (equities, Alpaca paper, local phi3)
 After=network-online.target ollama.service
 Wants=network-online.target ollama.service
 
@@ -20,7 +25,7 @@ Type=simple
 User=jose
 WorkingDirectory=/home/jose/Documents/projects/salazar-trader
 EnvironmentFile=/home/jose/Documents/projects/salazar-trader/.env
-ExecStart=/home/jose/Documents/projects/salazar-trader/.venv/bin/python -m app.main
+ExecStart=/home/jose/Documents/projects/salazar-trader/.venv/bin/python -m app.api
 Restart=on-failure
 RestartSec=10
 # Give Ollama/network a moment on boot before first connect attempts.

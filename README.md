@@ -76,16 +76,27 @@ Plus valid Alpaca credentials. See `docs/RISK_CONTROLS.md`.
 ```bash
 git clone https://github.com/salazj/salazar-trader.git
 cd salazar-trader
-bash scripts/setup_jetson.sh         # see docs/JETSON_DEPLOYMENT.md
-
 cp .env.example .env
 # edit .env: add ALPACA_API_KEY / ALPACA_SECRET_KEY
 
-source .venv/bin/activate
-python -m app.api                     # FastAPI on :8000
+./start.sh            # interactive menu: Containerized or Native (see below)
 ```
 
-Then open the dashboard at `http://<jetson-ip>:3000`.
+`./start.sh` is the single entry point and offers two install paths — both
+ship the **React web dashboard**:
+
+| Path             | What runs                                              | GUI URL                  |
+|------------------|--------------------------------------------------------|--------------------------|
+| **Containerized**| Docker compose: `ollama` + backend + frontend (nginx)  | `http://<ip>:3000`       |
+| **Native**       | Python venv + systemd service running the API+GUI server | `http://<ip>:8000`     |
+
+In both paths, **trading is started from the dashboard** (the server does not
+autostart trading). Stop everything with `./stop.sh`.
+
+`start.sh` is **idempotent**: once installed, running `./start.sh` again
+detects the existing install and simply starts it (it won't reinstall or
+rebuild). `./stop.sh` likewise detects whether the container stack or the
+native service is running and stops the right one.
 
 The dashboard shows:
 
@@ -97,10 +108,14 @@ The dashboard shows:
 
 ---
 
-## Running headless 24/7 (systemd)
+## Running 24/7 (native systemd)
 
-For unattended operation on the Jetson, run the bot directly (no Docker)
-as a systemd service. This auto-starts on boot and auto-restarts on crash.
+`./start.sh native` sets this up for you (venv + systemd unit). The service
+runs the **API + GUI server** (`python -m app.api`) and auto-starts on boot /
+auto-restarts on crash. Trading itself is started from the dashboard, so after
+a reboot open `http://<ip>:8000` and press **Start**.
+
+To do it manually (or to understand what `start.sh native` does):
 
 ```bash
 # 1. Verify Alpaca connectivity first
@@ -109,7 +124,7 @@ as a systemd service. This auto-starts on boot and auto-restarts on crash.
 # 2. Make sure Ollama is running as a service (for the local LLM)
 sudo systemctl enable --now ollama
 
-# 3. Install the bot service (edit paths in the file if yours differ)
+# 3. Install the service (edit User / paths in the file if yours differ)
 sudo cp deploy/salazar-trader.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now salazar-trader
@@ -164,18 +179,86 @@ source ~/.bashrc
 
 ---
 
-## Alternative: Docker stack (with web dashboard)
+## Install paths (`start.sh`)
 
-`start.sh` / `stop.sh` run a **containerized** backend (FastAPI :8000) +
-React frontend (:3000) via `docker compose`. This is an alternative to
-the headless systemd path above — use it if you want the web dashboard.
-Note it does not use the host's systemd service or the friendly log
-viewer, and containers need extra config to reach a host-side Ollama.
+`./start.sh` with no arguments is **smart**: if Salazar Trader is already
+installed it just starts it; otherwise it shows the install menu. You can also
+run it non-interactively:
 
 ```bash
-./start.sh    # build images, start backend + frontend, tail backend logs
-./stop.sh     # stop and remove the containers
+./start.sh                   # detect existing install and start it (or show menu)
+./start.sh install           # always show the install menu
+
+./start.sh docker            # containerized; build/pull only if images are missing
+./start.sh docker --pull     # containerized, force pull prebuilt images from GHCR
+./start.sh docker --build    # containerized, force build images from local source
+
+./start.sh native            # native; (re)install only if needed, then start
+./start.sh native --reinstall# native, force venv reinstall + systemd unit refresh
+
+./stop.sh                    # stop whichever path is running (container or native)
 ```
+
+How the smart start decides what to do:
+
+| Situation                         | `./start.sh` (no args) does…                     |
+|-----------------------------------|--------------------------------------------------|
+| Nothing installed                 | shows the install menu                           |
+| Native install present            | starts the systemd service (no reinstall)        |
+| Container images/containers present | `docker compose up -d` (no rebuild/pull)       |
+| Both present                      | asks which one to start                          |
+
+### Containerized (Docker)
+
+Runs three services via `docker compose`: a swappable **`ollama`** LLM
+container, the **backend** (FastAPI on :8000), and the **frontend** (React via
+nginx on :3000). The frontend proxies API/WS calls to the backend, and the
+backend's LLM endpoints are pointed at the `ollama` container automatically
+(overriding the `127.0.0.1` values in `.env`).
+
+* **Pull prebuilt (GHCR):** fastest — uses `ghcr.io/salazj/salazar-trader` and
+  `…-frontend`. (ARM64 images, see *Publishing* below.)
+* **Build from source:** uses the local `Dockerfile` / `frontend/Dockerfile`
+  via `docker-compose.build.yml`.
+
+**Swapping the LLM model** (containerized): set `OLLAMA_MODEL` in `.env` (e.g.
+`OLLAMA_MODEL=llama3.1`) and re-run `./start.sh docker`. The one-shot
+`ollama-pull` service fetches the new model into the `ollama-models` volume and
+the backend uses it. The Jetson GPU is used best-effort via the `nvidia`
+runtime; if that runtime isn't installed, comment out the `runtime: nvidia`
+line in `docker-compose.yml` to fall back to CPU.
+
+### Native (systemd)
+
+For Node-free hosts: the repo ships a **pre-built GUI bundle** in
+`app/api/static/`, so the FastAPI server serves both the API and the dashboard
+on :8000 — no nginx, no Node. `./start.sh native` creates a `.venv`,
+`pip install -e .`, renders a systemd unit for the current path/user, and
+enables it. Trading is started from the dashboard; after a reboot, open the
+dashboard and press **Start**. This path expects Ollama to run as its own
+host service (`sudo systemctl enable --now ollama`).
+
+> Rebuilding the GUI bundle: when the frontend changes, rebuild and re-commit
+> the bundle on a machine with Node:
+> `cd frontend && npm install && npm run build && rm -rf ../app/api/static && cp -R dist/. ../app/api/static/`.
+
+---
+
+## Publishing images (ARM64 → GHCR)
+
+`scripts/publish_images.sh` builds and pushes the backend and frontend images
+for `linux/arm64` (Jetson / Apple Silicon target). You need a GitHub token with
+`write:packages`:
+
+```bash
+export GHCR_USER=salazj
+export GHCR_TOKEN=ghp_xxxxxxxx          # write:packages scope
+./scripts/publish_images.sh             # builds + pushes :latest
+TAG=v3.0.0 ./scripts/publish_images.sh  # tagged release
+```
+
+After publishing, any host can `./start.sh docker` (pull path) to run the
+latest images without building locally.
 
 ---
 
@@ -297,9 +380,11 @@ backwards compatibility.
 
 | Script                              | Purpose                                       |
 |-------------------------------------|-----------------------------------------------|
+| `start.sh` / `stop.sh`              | Unified launcher (containerized or native)    |
 | `scripts/setup_jetson.sh`           | One-shot Jetson setup (deps, venv, Ollama)    |
 | `scripts/diagnose_alpaca.py`        | Smoke-test Alpaca credentials + connectivity  |
 | `scripts/logs.sh`                   | Friendly log viewer (live/errors/trades/news) |
+| `scripts/publish_images.sh`         | Build + push ARM64 images to GHCR             |
 | `scripts/backtest_stock_strategy.py`| Single-strategy + walk-forward backtests      |
 | `deploy/salazar-trader.service`     | systemd unit for 24/7 operation               |
 | `deploy/salazar-trader.logrotate`   | Log rotation (14 compressed days)             |

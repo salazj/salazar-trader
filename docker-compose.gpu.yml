@@ -1,0 +1,12 @@
+# GPU override for the ollama LLM container on NVIDIA hosts (e.g. Jetson).
+#
+# Requires the NVIDIA container runtime to be installed and registered with
+# Docker. start.sh auto-applies this file when it detects the `nvidia`
+# runtime; otherwise the stack runs Ollama on CPU.
+#
+# Manual usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+services:
+  ollama:
+    runtime: nvidia

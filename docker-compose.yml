@@ -5,6 +5,42 @@ x-common-volumes: &common-volumes
   - ./reports:/app/reports
 
 services:
+  # ── Local LLM (Ollama, swappable model) ────────────────────────────
+  # The model is controlled by OLLAMA_MODEL (default: phi3). Swap models
+  # by changing OLLAMA_MODEL in .env and running `docker compose up -d`
+  # (the ollama-pull one-shot will fetch the new model).
+  ollama:
+    image: ollama/ollama:latest
+    container_name: salazar-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    # Runs on CPU by default (works everywhere: Mac, plain Linux). For GPU
+    # acceleration on Jetson / NVIDIA hosts, start.sh auto-applies
+    # docker-compose.gpu.yml when the nvidia container runtime is detected
+    # (or run: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d).
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      start_period: 20s
+      retries: 5
+
+  # ── One-shot: pull the configured model into the ollama volume ─────
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: salazar-ollama-pull
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull ${OLLAMA_MODEL:-phi3}"]
+
   # ── Backend (FastAPI + BotManager) ─────────────────────────────────
   backend:
     image: ghcr.io/salazj/salazar-trader:latest
@@ -12,9 +48,19 @@ services:
     env_file: .env
     restart: unless-stopped
     command: ["api"]
+    # Override the .env localhost LLM endpoints to reach the ollama
+    # container on the compose network. OLLAMA_MODEL keeps it swappable.
+    environment:
+      - LLM_BASE_URL=http://ollama:11434/v1
+      - LLM_MODEL_NAME=${OLLAMA_MODEL:-phi3}
+      - LOCAL_LLM_ENDPOINT=http://ollama:11434
+      - LOCAL_LLM_MODEL_NAME=${OLLAMA_MODEL:-phi3}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes: *common-volumes
+    depends_on:
+      ollama:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/api/health"]
       interval: 30s
@@ -40,9 +86,17 @@ services:
     env_file: .env
     restart: unless-stopped
     command: ["bot"]
+    environment:
+      - LLM_BASE_URL=http://ollama:11434/v1
+      - LLM_MODEL_NAME=${OLLAMA_MODEL:-phi3}
+      - LOCAL_LLM_ENDPOINT=http://ollama:11434
+      - LOCAL_LLM_MODEL_NAME=${OLLAMA_MODEL:-phi3}
     volumes: *common-volumes
     ports:
       - "${HEALTH_PORT:-8880}:8880"
+    depends_on:
+      ollama:
+        condition: service_healthy
     profiles:
       - standalone
 
@@ -73,3 +127,6 @@ services:
     profiles:
       - tools
     command: ["train"]
+
+volumes:
+  ollama-models:
