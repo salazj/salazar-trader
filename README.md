@@ -97,6 +97,88 @@ The dashboard shows:
 
 ---
 
+## Running headless 24/7 (systemd)
+
+For unattended operation on the Jetson, run the bot directly (no Docker)
+as a systemd service. This auto-starts on boot and auto-restarts on crash.
+
+```bash
+# 1. Verify Alpaca connectivity first
+.venv/bin/python scripts/diagnose_alpaca.py
+
+# 2. Make sure Ollama is running as a service (for the local LLM)
+sudo systemctl enable --now ollama
+
+# 3. Install the bot service (edit paths in the file if yours differ)
+sudo cp deploy/salazar-trader.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now salazar-trader
+
+# 4. Install log rotation (keeps 14 compressed days)
+sudo cp deploy/salazar-trader.logrotate /etc/logrotate.d/salazar-trader
+```
+
+Service control:
+
+| Task                       | Command                                   |
+|----------------------------|-------------------------------------------|
+| Status                     | `sudo systemctl status salazar-trader`    |
+| Start / Stop               | `sudo systemctl start\|stop salazar-trader` |
+| Restart (after `git pull`) | `sudo systemctl restart salazar-trader`   |
+| Disable auto-start         | `sudo systemctl disable salazar-trader`   |
+
+Updating to the latest code:
+
+```bash
+cd ~/salazar-trader
+git pull
+.venv/bin/pip install -e . --upgrade   # only if pyproject.toml changed
+sudo systemctl restart salazar-trader
+```
+
+---
+
+## Viewing logs
+
+The service writes everything to `/var/log/salazar-trader.log`. The
+`scripts/logs.sh` helper wraps `journalctl`/`tail` with simple commands:
+
+```bash
+./scripts/logs.sh            # live tail (the everyday one)
+./scripts/logs.sh tail 500   # last 500 lines, no follow
+./scripts/logs.sh errors     # only warnings/errors (live)
+./scripts/logs.sh trades     # only orders/decisions/fills (live)
+./scripts/logs.sh news       # only news + LLM + universe activity (live)
+./scripts/logs.sh today      # everything logged today
+./scripts/logs.sh status     # systemd service status
+./scripts/logs.sh help       # full command list
+```
+
+Optional shortcut from anywhere:
+
+```bash
+echo "alias strader-logs='cd ~/salazar-trader && ./scripts/logs.sh'" >> ~/.bashrc
+source ~/.bashrc
+# then: strader-logs   (or  strader-logs trades)
+```
+
+---
+
+## Alternative: Docker stack (with web dashboard)
+
+`start.sh` / `stop.sh` run a **containerized** backend (FastAPI :8000) +
+React frontend (:3000) via `docker compose`. This is an alternative to
+the headless systemd path above — use it if you want the web dashboard.
+Note it does not use the host's systemd service or the friendly log
+viewer, and containers need extra config to reach a host-side Ollama.
+
+```bash
+./start.sh    # build images, start backend + frontend, tail backend logs
+./stop.sh     # stop and remove the containers
+```
+
+---
+
 ## Architecture
 
 ```
@@ -210,6 +292,17 @@ backwards compatibility.
 | `docs/RISK_CONTROLS.md`           | Every deterministic gate, kill-switch          |
 | `docs/API_REFERENCE.md`           | Full REST API surface                          |
 | `docs/GUI_GUIDE.md`               | Dashboard walkthrough                          |
+
+### Helper scripts
+
+| Script                              | Purpose                                       |
+|-------------------------------------|-----------------------------------------------|
+| `scripts/setup_jetson.sh`           | One-shot Jetson setup (deps, venv, Ollama)    |
+| `scripts/diagnose_alpaca.py`        | Smoke-test Alpaca credentials + connectivity  |
+| `scripts/logs.sh`                   | Friendly log viewer (live/errors/trades/news) |
+| `scripts/backtest_stock_strategy.py`| Single-strategy + walk-forward backtests      |
+| `deploy/salazar-trader.service`     | systemd unit for 24/7 operation               |
+| `deploy/salazar-trader.logrotate`   | Log rotation (14 compressed days)             |
 
 ---
 
