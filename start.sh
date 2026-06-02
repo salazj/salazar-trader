@@ -307,6 +307,9 @@ Restart=on-failure
 RestartSec=10
 TimeoutStartSec=60
 KillSignal=SIGINT
+# Bound graceful shutdown — force-kill if the bot/uvicorn don't exit in 25s
+# (otherwise an in-flight LLM call or websocket can stall the stop for minutes).
+TimeoutStopSec=25
 StandardOutput=append:/var/log/salazar-trader.log
 StandardError=append:/var/log/salazar-trader.log
 

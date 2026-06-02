@@ -53,6 +53,10 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
   if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
     c_blue "==> Stopping native systemd service (${SERVICE_NAME})..."
+    # Surface the sudo password prompt so it doesn't look like a freeze.
+    if ! sudo -n true 2>/dev/null; then
+      c_blue "==> This step needs sudo — enter your password if prompted:"
+    fi
     sudo systemctl stop "${SERVICE_NAME}" || true
     unload_ollama_models
     stopped_something=true

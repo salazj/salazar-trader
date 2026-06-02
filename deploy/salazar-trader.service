@@ -31,6 +31,10 @@ RestartSec=10
 # Give Ollama/network a moment on boot before first connect attempts.
 TimeoutStartSec=60
 KillSignal=SIGINT
+# Bound graceful shutdown — force-kill if the bot/uvicorn don't exit in 25s
+# (otherwise an in-flight LLM call or websocket can stall the stop for ~90s).
+TimeoutStopSec=25
+# For headless autostart (trading begins on boot) add: Environment=HEADLESS_AUTOSTART=1
 StandardOutput=append:/var/log/salazar-trader.log
 StandardError=append:/var/log/salazar-trader.log
 
