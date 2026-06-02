@@ -224,9 +224,10 @@ backend's LLM endpoints are pointed at the `ollama` container automatically
 **Swapping the LLM model** (containerized): set `OLLAMA_MODEL` in `.env` (e.g.
 `OLLAMA_MODEL=llama3.1`) and re-run `./start.sh docker`. The one-shot
 `ollama-pull` service fetches the new model into the `ollama-models` volume and
-the backend uses it. The Jetson GPU is used best-effort via the `nvidia`
-runtime; if that runtime isn't installed, comment out the `runtime: nvidia`
-line in `docker-compose.yml` to fall back to CPU.
+the backend uses it. GPU is opt-in: `start.sh` auto-applies
+`docker-compose.gpu.yml` (which sets `runtime: nvidia`) only when the NVIDIA
+container runtime is registered with Docker; otherwise the `ollama` container
+runs on CPU.
 
 ### Native (systemd)
 
@@ -235,8 +236,15 @@ For Node-free hosts: the repo ships a **pre-built GUI bundle** in
 on :8000 — no nginx, no Node. `./start.sh native` creates a `.venv`,
 `pip install -e .`, renders a systemd unit for the current path/user, and
 enables it. Trading is started from the dashboard; after a reboot, open the
-dashboard and press **Start**. This path expects Ollama to run as its own
-host service (`sudo systemctl enable --now ollama`).
+dashboard and press **Start**.
+
+`start.sh native` also **ensures the host Ollama is running and the configured
+model is pulled** before starting the service: it starts the `ollama` systemd
+service if needed and runs `ollama pull` for the model (resolved from
+`OLLAMA_MODEL`, else `LOCAL_LLM_MODEL_NAME`/`LLM_MODEL_NAME` in `.env`, default
+`phi3`). To swap the native model, change that value in `.env` and re-run
+`./start.sh native`. If Ollama isn't installed, the L3 LLM is skipped (the bot
+falls back to keyword classification).
 
 > Rebuilding the GUI bundle: when the frontend changes, rebuild and re-commit
 > the bundle on a machine with Node:

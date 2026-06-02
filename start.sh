@@ -59,6 +59,65 @@ local_ip() {
   fi
 }
 
+env_val() {
+  # Read a KEY=value from .env (last match wins), stripping quotes/whitespace.
+  [ -f .env ] || return 0
+  grep -E "^${1}=" .env 2>/dev/null | tail -1 | cut -d= -f2- \
+    | sed -e 's/[[:space:]]*#.*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' \
+    | xargs 2>/dev/null || true
+}
+
+ollama_model() {
+  # Model used by the local LLM. Prefer OLLAMA_MODEL (shared with the
+  # containerized path), then the native LLM env vars, else phi3.
+  local m
+  m="$(env_val OLLAMA_MODEL)";        [ -n "$m" ] && { echo "$m"; return; }
+  m="$(env_val LOCAL_LLM_MODEL_NAME)"; [ -n "$m" ] && { echo "$m"; return; }
+  m="$(env_val LLM_MODEL_NAME)";      [ -n "$m" ] && { echo "$m"; return; }
+  echo "phi3"
+}
+
+ensure_ollama_native() {
+  # Make sure the host Ollama is running and the configured model is pulled,
+  # so the L3 LLM is available as soon as trading starts.
+  local model; model="$(ollama_model)"
+
+  if ! command -v ollama >/dev/null 2>&1; then
+    c_red "==> Ollama not found on host — the local LLM (L3) will be unavailable."
+    echo  "    Install from https://ollama.com/download, then: ollama pull ${model}"
+    return 0
+  fi
+
+  # Start the ollama systemd service if it isn't already running.
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl list-unit-files ollama.service >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet ollama 2>/dev/null; then
+      c_blue "==> Starting Ollama service..."
+      sudo systemctl enable --now ollama || true
+    fi
+  fi
+
+  # Wait for the Ollama API to come up.
+  c_blue "==> Waiting for Ollama API (127.0.0.1:11434)..."
+  local up=false
+  for _ in $(seq 1 20); do
+    if curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then up=true; break; fi
+    sleep 1
+  done
+  if ! $up; then
+    c_red "    Ollama API not responding — L3 LLM may be unavailable."
+    return 0
+  fi
+
+  # Ensure the model is present (pull on first run).
+  if ollama list 2>/dev/null | awk '{print $1}' | grep -qE "^${model}(:|$)"; then
+    c_green "==> Ollama model '${model}' is present."
+  else
+    c_blue "==> Pulling Ollama model '${model}' (first time may take a while)..."
+    ollama pull "${model}" || c_red "    (model pull failed; L3 LLM will fall back to keywords)"
+  fi
+}
+
 # ── install detection ──────────────────────────────────────────────
 native_installed() {
   [ -f "$UNIT_PATH" ] && [ -x "${SCRIPT_DIR}/.venv/bin/python" ]
@@ -209,6 +268,8 @@ start_native() {
     echo  "Or use the containerized path: ./start.sh docker"
     exit 1
   fi
+
+  ensure_ollama_native
 
   if [ "$mode" != "reinstall" ] && native_installed; then
     c_blue "==> Existing native install detected — starting service..."
