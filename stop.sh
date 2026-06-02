@@ -14,6 +14,25 @@ SERVICE_NAME="salazar-trader"
 c_blue()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
 c_green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
+# Unload any models the host Ollama is holding in memory (frees RAM/GPU).
+# The models stay on disk and the ollama service keeps running; start.sh
+# re-warms the model next time. (Containerized stop frees memory by bringing
+# the ollama container down, so this is only needed for the native path.)
+unload_ollama_models() {
+  command -v ollama >/dev/null 2>&1 || return 0
+  curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 || return 0
+  local loaded
+  loaded="$(ollama ps 2>/dev/null | awk 'NR>1 && $1!="" {print $1}')"
+  [ -z "$loaded" ] && return 0
+  local m
+  for m in $loaded; do
+    c_blue "==> Unloading Ollama model '${m}' from memory..."
+    ollama stop "$m" >/dev/null 2>&1 || \
+      curl -sf http://127.0.0.1:11434/api/generate \
+        -d "{\"model\":\"${m}\",\"keep_alive\":0}" >/dev/null 2>&1 || true
+  done
+}
+
 stopped_something=false
 
 # ── Containerized ──────────────────────────────────────────────────
@@ -35,6 +54,7 @@ if command -v systemctl >/dev/null 2>&1; then
   if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
     c_blue "==> Stopping native systemd service (${SERVICE_NAME})..."
     sudo systemctl stop "${SERVICE_NAME}" || true
+    unload_ollama_models
     stopped_something=true
   fi
 fi
