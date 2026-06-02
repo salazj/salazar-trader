@@ -7,6 +7,7 @@ and configures the BotManager singleton on startup.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,12 +30,50 @@ logger = get_logger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+def _headless_autostart_enabled() -> bool:
+    return os.environ.get("HEADLESS_AUTOSTART", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+async def _headless_autostart(app: FastAPI) -> None:
+    """Start trading automatically (headless mode).
+
+    Rebuilds the run-config from the .env Settings so the bot trades with the
+    configured asset class / universe / risk limits — a bare RunConfig() would
+    reset to the prediction-markets defaults.
+    """
+    await asyncio.sleep(2)  # let the server finish coming up first
+    try:
+        from app.api.schemas import RunConfig
+        from app.config.settings import get_settings
+
+        settings = get_settings()
+        fields = {
+            name: getattr(settings, name)
+            for name in RunConfig.model_fields
+            if hasattr(settings, name)
+        }
+        config = RunConfig(**fields)
+        logger.info("headless_autostart_begin", asset_class=config.asset_class)
+        await app.state.bot_manager.start(config)
+        logger.info("headless_autostart_done")
+    except Exception:
+        logger.exception("headless_autostart_failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup / shutdown lifecycle."""
     setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
     app.state.bot_manager = BotManager()
     logger.info("api_server_started")
+    if _headless_autostart_enabled():
+        logger.info("headless_autostart_scheduled")
+        asyncio.create_task(_headless_autostart(app))
     yield
     mgr: BotManager = app.state.bot_manager
     if mgr.is_running:

@@ -23,6 +23,12 @@
 #   ./start.sh native --reinstall# native, force venv reinstall + unit refresh
 #   ./start.sh install           # always show the install menu
 #
+# Headless mode (autostart trading, no need to press Start in the dashboard):
+#   ./start.sh --headless            # detect install + start trading automatically
+#   ./start.sh native --headless     # native, autostart trading on boot
+#   ./start.sh docker --headless     # containerized, autostart trading on boot
+# The GUI is still available in headless mode (for monitoring / manual stop).
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -34,6 +40,9 @@ SERVICE_NAME="salazar-trader"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 BACKEND_IMAGE="ghcr.io/salazj/salazar-trader:latest"
 FRONTEND_IMAGE="ghcr.io/salazj/salazar-trader-frontend:latest"
+
+# Set to 1 by the --headless flag; makes the bot autostart trading.
+HEADLESS=0
 
 # ── helpers ────────────────────────────────────────────────────────
 c_blue()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
@@ -173,6 +182,15 @@ start_docker() {
     c_blue "==> No NVIDIA runtime — ollama will run on CPU."
   fi
 
+  # Headless: pass the autostart flag into the backend container (compose reads
+  # HEADLESS_AUTOSTART from the environment). Exported so `up` picks it up.
+  if [ "$HEADLESS" = "1" ]; then
+    export HEADLESS_AUTOSTART=1
+    c_blue "==> Headless autostart ON (trading starts automatically)."
+  else
+    export HEADLESS_AUTOSTART=0
+  fi
+
   local -a cf
   case "$mode" in
     build)
@@ -229,7 +247,13 @@ print_docker_urls() {
   c_green "  API:       http://${ip}:${API_PORT}"
   c_green "============================================"
   echo ""
-  echo "  Start/stop trading from the dashboard."
+  if [ "$HEADLESS" = "1" ]; then
+    echo "  Headless: trading autostarts automatically (and on container restart)."
+    echo "  Use the dashboard to monitor; ./stop.sh to stop."
+  else
+    echo "  Start/stop trading from the dashboard."
+    echo "  (Tip: ./start.sh docker --headless to autostart trading.)"
+  fi
   echo "  Logs:  docker compose logs -f backend"
   echo "  Stop:  ./stop.sh"
 }
@@ -247,8 +271,23 @@ ensure_venv() {
 
 install_service() {
   local user; user="$(id -un)"
+  # When headless, bake the autostart flag into the unit so trading resumes
+  # automatically on every boot.
+  local headless_env=""
+  if [ "$HEADLESS" = "1" ]; then
+    headless_env="Environment=HEADLESS_AUTOSTART=1"
+    c_blue "==> Installing systemd service (${SERVICE_NAME}) — headless autostart ON..."
+  else
+    c_blue "==> Installing systemd service (${SERVICE_NAME})..."
+  fi
 
-  c_blue "==> Installing systemd service (${SERVICE_NAME})..."
+  # Configuring/refreshing the systemd unit needs root. Surface the password
+  # prompt explicitly (and cache it) so it doesn't look like the script froze.
+  if ! sudo -n true 2>/dev/null; then
+    c_blue "==> This step needs sudo — enter your password if prompted:"
+  fi
+  sudo -v
+
   # Render a unit from the current path/user so it works on any host.
   local tmp; tmp="$(mktemp)"
   cat > "$tmp" <<EOF
@@ -262,6 +301,7 @@ Type=simple
 User=${user}
 WorkingDirectory=${SCRIPT_DIR}
 EnvironmentFile=${SCRIPT_DIR}/.env
+${headless_env}
 ExecStart=${SCRIPT_DIR}/.venv/bin/python -m app.api
 Restart=on-failure
 RestartSec=10
@@ -279,7 +319,9 @@ EOF
   sudo touch /var/log/salazar-trader.log
   sudo chown "${user}:${user}" /var/log/salazar-trader.log 2>/dev/null || true
   sudo systemctl daemon-reload
-  sudo systemctl enable --now "${SERVICE_NAME}"
+  sudo systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1 || true
+  # restart (not just start) so a refreshed unit picks up env changes.
+  sudo systemctl restart "${SERVICE_NAME}"
 }
 
 start_native() {
@@ -296,13 +338,18 @@ start_native() {
 
   ensure_ollama_native
 
-  if [ "$mode" != "reinstall" ] && native_installed; then
+  if [ "$mode" = "reinstall" ] || ! native_installed; then
+    # Fresh install (or forced reinstall): venv + render unit.
+    ensure_venv
+    install_service
+  elif [ "$HEADLESS" = "1" ]; then
+    # Already installed, but --headless needs the autostart flag written into
+    # the unit — re-render it (no venv reinstall) and restart.
+    install_service
+  else
     c_blue "==> Existing native install detected — starting service..."
     sudo systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1 || true
     sudo systemctl start "${SERVICE_NAME}"
-  else
-    ensure_venv
-    install_service
   fi
 
   print_native_urls
@@ -315,8 +362,14 @@ print_native_urls() {
   c_green "  GUI + API:  http://${ip}:${API_PORT}"
   c_green "============================================"
   echo ""
-  echo "  Trading is started from the dashboard (no autostart)."
-  echo "  After a reboot, open the dashboard and press Start."
+  if [ "$HEADLESS" = "1" ]; then
+    echo "  Headless: trading autostarts automatically (and on every boot)."
+    echo "  Use the dashboard to monitor; ./stop.sh to stop."
+  else
+    echo "  Trading is started from the dashboard (no autostart)."
+    echo "  After a reboot, open the dashboard and press Start."
+    echo "  (Tip: ./start.sh native --headless to autostart trading on boot.)"
+  fi
   echo "  Logs:  ./scripts/logs.sh live    (or journalctl -u ${SERVICE_NAME} -f)"
   echo "  Stop:  ./stop.sh"
 }
@@ -379,16 +432,25 @@ install_menu() {
 }
 
 # ── arg dispatch ───────────────────────────────────────────────────
-case "${1:-}" in
+# Pull out --headless (allowed anywhere); keep the rest as positional args.
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --headless|-headless) HEADLESS=1 ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+
+case "${ARGS[0]:-}" in
   docker|container|containerized)
-    case "${2:-}" in
+    case "${ARGS[1]:-}" in
       --build) start_docker build ;;
       --pull)  start_docker pull ;;
       *)       start_docker auto ;;
     esac
     ;;
   native|systemd)
-    if [ "${2:-}" = "--reinstall" ]; then start_native reinstall; else start_native auto; fi
+    if [ "${ARGS[1]:-}" = "--reinstall" ]; then start_native reinstall; else start_native auto; fi
     ;;
   ""|start)
     auto_start
@@ -397,11 +459,11 @@ case "${1:-}" in
     install_menu
     ;;
   -h|--help)
-    sed -n '2,31p' "$0"
+    sed -n '2,37p' "$0"
     ;;
   *)
-    c_red "Unknown argument: $1"
-    echo  "Usage: ./start.sh [docker [--build|--pull] | native [--reinstall] | install]"
+    c_red "Unknown argument: ${ARGS[0]}"
+    echo  "Usage: ./start.sh [docker [--build|--pull] | native [--reinstall] | install] [--headless]"
     exit 1
     ;;
 esac

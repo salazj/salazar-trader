@@ -208,6 +208,26 @@ How the smart start decides what to do:
 | Container images/containers present | `docker compose up -d` (no rebuild/pull)       |
 | Both present                      | asks which one to start                          |
 
+### Headless mode (`--headless`)
+
+By default the API + GUI come up and **you press Start in the dashboard** to
+begin trading. Add `--headless` to autostart trading automatically — useful for
+24/7 unattended operation. The GUI stays available for monitoring and stopping.
+
+```bash
+./start.sh --headless           # detect install + autostart trading
+./start.sh native --headless    # native: autostart trading on every boot
+./start.sh docker --headless    # containerized: autostart trading on container start
+```
+
+`--headless` sets `HEADLESS_AUTOSTART=1` for the backend (baked into the systemd
+unit for native, passed to the backend container for docker), so trading also
+resumes automatically after a reboot or container restart. The bot starts with
+the exact config from your `.env` (asset class, stock universe, risk limits).
+
+To turn autostart back off, re-run without the flag: `./start.sh native --reinstall`
+(native) or `./start.sh docker` (containerized).
+
 ### Containerized (Docker)
 
 Runs three services via `docker compose`: a swappable **`ollama`** LLM

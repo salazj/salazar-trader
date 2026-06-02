@@ -55,6 +55,8 @@ services:
       - LLM_MODEL_NAME=${OLLAMA_MODEL:-phi3}
       - LOCAL_LLM_ENDPOINT=http://ollama:11434
       - LOCAL_LLM_MODEL_NAME=${OLLAMA_MODEL:-phi3}
+      # Autostart trading on boot when start.sh --headless is used.
+      - HEADLESS_AUTOSTART=${HEADLESS_AUTOSTART:-0}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes: *common-volumes
