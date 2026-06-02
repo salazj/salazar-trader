@@ -114,7 +114,18 @@ ensure_ollama_native() {
     c_green "==> Ollama model '${model}' is present."
   else
     c_blue "==> Pulling Ollama model '${model}' (first time may take a while)..."
-    ollama pull "${model}" || c_red "    (model pull failed; L3 LLM will fall back to keywords)"
+    ollama pull "${model}" || { c_red "    (model pull failed; L3 LLM will fall back to keywords)"; return 0; }
+  fi
+
+  # Warm it up: load into memory and keep it resident (keep_alive=-1) so it
+  # shows in `ollama ps`, has no cold-start latency, and is ready the moment
+  # the bot classifies its first headline. (Empty prompt = load only.)
+  c_blue "==> Warming up '${model}' (loading into memory, keep-alive=always)..."
+  if curl -sf http://127.0.0.1:11434/api/generate \
+       -d "{\"model\":\"${model}\",\"keep_alive\":-1}" >/dev/null 2>&1; then
+    c_green "==> '${model}' is loaded and resident (verify: ollama ps)."
+  else
+    c_red "    (warm-up request failed; model will load on first use instead)"
   fi
 }
 
@@ -186,12 +197,26 @@ start_docker() {
       ;;
   esac
 
+  local model; model="$(ollama_model)"
+
   c_blue "==> Starting stack (ollama + backend + frontend)..."
   docker compose "${cf[@]}" up -d ollama
-  c_blue "==> Ensuring LLM model (${OLLAMA_MODEL:-phi3}) is present..."
+  c_blue "==> Ensuring LLM model (${model}) is present..."
   docker compose "${cf[@]}" up ollama-pull || \
     c_red "    (model pull failed/skipped; you can retry later)"
   docker compose "${cf[@]}" up -d backend frontend
+
+  # Warm up the model so it's loaded and resident (shows in `ollama ps`,
+  # no cold-start on the first headline). The ollama container's API is
+  # published on the host at OLLAMA_PORT (default 11434).
+  local oport; oport="$(env_val OLLAMA_PORT)"; oport="${oport:-11434}"
+  c_blue "==> Warming up '${model}' (loading into memory, keep-alive=always)..."
+  if curl -sf "http://127.0.0.1:${oport}/api/generate" \
+       -d "{\"model\":\"${model}\",\"keep_alive\":-1}" >/dev/null 2>&1; then
+    c_green "==> '${model}' is loaded and resident (verify: docker exec salazar-ollama ollama ps)."
+  else
+    c_red "    (warm-up request failed; model will load on first use instead)"
+  fi
 
   print_docker_urls
 }
