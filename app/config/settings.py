@@ -122,6 +122,14 @@ class Settings(BaseSettings):
     nlp_provider: str = "mock"
     nlp_providers: str = ""
     news_poll_interval: int = Field(default=300, ge=10)
+    # Cap how many (deduplicated, newest-first) news items are LLM-classified
+    # per poll cycle. Bounds load on a local model (e.g. phi3 on a Jetson) so
+    # classification finishes inside the poll window. 0 = unlimited.
+    news_max_classify_per_cycle: int = Field(default=40, ge=0)
+    # Equities only: skip LLM classification for headlines that name no
+    # tradeable ticker/company (resolved against the curated name table).
+    # Slashes wasted inference; hot-ticker discovery is unaffected.
+    news_relevance_prefilter: bool = True
     news_file_dir: str = "data/news"
     newsapi_key: str = ""
     rss_feed_urls: str = ""

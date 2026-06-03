@@ -85,6 +85,7 @@ class TradingBot:
         self._news_service = NewsIngestionService(
             pipeline=self._nlp_pipeline,
             poll_interval=float(self._settings.news_poll_interval),
+            max_classify_per_cycle=int(self._settings.news_max_classify_per_cycle),
         )
         self._setup_nlp_providers()
 
@@ -388,6 +389,16 @@ class TradingBot:
         # and the per-symbol news context cache (consumed by the L3 LLM).
         self._nlp_pipeline.add_classified_hook(self._on_news_classified)
 
+        # Relevance pre-gate: only LLM-classify headlines that name a tradeable
+        # ticker/company. Hot-ticker discovery already falls back to this same
+        # resolver, so the gate costs no discovery while sparing the local model
+        # from classifying hundreds of irrelevant headlines each cycle.
+        if self._settings.news_relevance_prefilter:
+            _resolver = self._stock_universe.resolver
+            self._nlp_pipeline.set_prefilter(
+                lambda text: bool(_resolver.resolve_text(text))
+            )
+
         # Three-layer decision support.
         self._stock_decision_engine = StockDecisionEngine(
             self._settings, risk_manager=self._stock_risk
@@ -513,6 +524,12 @@ class TradingBot:
         if name == "finnhub":
             return FinnhubProvider(api_key=self._settings.finnhub_api_key)
         if name in ("sports", "betstack"):
+            # Sports/betstack feeds prediction-market parlays; in equities mode
+            # it only adds hundreds of irrelevant headlines that waste the local
+            # LLM. Skip it so the Jetson spends classification on stock news.
+            if self._is_equities:
+                logger.info("nlp_provider_skipped_equities", name=name)
+                return None
             leagues = [
                 l.strip()
                 for l in self._settings.sports_leagues.split(",")

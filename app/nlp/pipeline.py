@@ -91,6 +91,22 @@ class NlpPipeline:
         self._min_relevance = min_relevance_for_signal
         self._min_confidence = min_confidence_for_signal
         self._classified_hooks: list[ClassifiedHook] = []
+        self._prefilter: Callable[[str], bool] | None = None
+
+    @property
+    def prefilter(self) -> Callable[[str], bool] | None:
+        return self._prefilter
+
+    def set_prefilter(self, fn: Callable[[str], bool] | None) -> None:
+        """Install a cheap relevance gate run *before* classification.
+
+        The predicate receives the normalized headline text and returns
+        ``True`` if the item is worth classifying. Items that fail are
+        dropped without ever touching the (expensive) LLM classifier. Used
+        by the equities path to skip headlines that mention no tradeable
+        ticker, sparing a local model from a flood of irrelevant news.
+        """
+        self._prefilter = fn
 
     def add_classified_hook(self, hook: ClassifiedHook) -> None:
         """Register a callback invoked for every successfully-classified item.
@@ -133,6 +149,14 @@ class NlpPipeline:
             return []
 
         clean_text = norm.normalized
+
+        # ── Step 1b: Cheap relevance gate (skip the LLM for irrelevant news) ──
+        if self._prefilter is not None and not self._prefilter(clean_text):
+            trace.dropped_reason = "prefilter_irrelevant"
+            trace.steps.append("dropped: prefilter (no tradeable entity)")
+            logger.debug("nlp_item_prefiltered", item_id=item.item_id)
+            self._log_trace(trace)
+            return []
 
         # ── Step 2: Map to markets (before classification so we can pass context) ──
         pre_matches = self._mapper.find_matches(
