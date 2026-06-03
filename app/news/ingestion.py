@@ -106,7 +106,10 @@ class NewsIngestionService:
             return []
 
         markets = self._get_markets() if self._get_markets else []
-        signals = self._pipeline.process_batch(all_items, markets)
+        # The pipeline classifies each item with the LLM synchronously, which can
+        # take minutes for a batch. Run it in a worker thread so the event loop
+        # (API/GUI, websocket bar ingestion, trading loop) stays responsive.
+        signals = await asyncio.to_thread(self._pipeline.process_batch, all_items, markets)
 
         cutoff = utc_now() - timedelta(seconds=self._max_signal_age)
         self._latest_signals = [
