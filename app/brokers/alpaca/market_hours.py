@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 
+try:
+    from zoneinfo import ZoneInfo
 
-_NYSE_TZ_OFFSET = timedelta(hours=-5)
+    _NYSE_TZ: timezone | "ZoneInfo" = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - fallback if tzdata is unavailable
+    # Approximate US Eastern; does NOT handle DST. Only used if zoneinfo fails.
+    _NYSE_TZ = timezone(timedelta(hours=-5))
 
 _MARKET_OPEN = time(9, 30)
 _MARKET_CLOSE = time(16, 0)
@@ -64,5 +69,5 @@ class MarketHoursManager:
 
     @staticmethod
     def _now_et() -> datetime:
-        """Current time in approximate US Eastern (UTC-5, no DST handling)."""
-        return datetime.now(timezone(timedelta(hours=-5)))
+        """Current time in US Eastern, DST-aware (America/New_York)."""
+        return datetime.now(_NYSE_TZ)

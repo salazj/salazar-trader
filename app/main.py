@@ -357,6 +357,11 @@ class TradingBot:
             self._settings, self._broker.market_data
         )
         self._stock_strategies = [cls() for cls in ALL_STOCK_STRATEGIES]
+        # Keep a handle on the news-gated strategy so the NLP hook can push
+        # bullish/bearish sentiment into its watchlist.
+        self._news_gated = next(
+            (s for s in self._stock_strategies if s.name == "stock_news_gated"), None
+        )
         self._stock_feature_engines: dict[str, StockFeatureEngine] = {}
         self._active_markets: list[Market] = []
 
@@ -404,6 +409,31 @@ class TradingBot:
                 self._stock_news_context[ticker] = item.text[:240]
             except Exception:
                 continue
+
+        # Feed directional sentiment into the news-gated strategy so confident,
+        # relevant bullish headlines about a tracked ticker can open the gate.
+        if self._news_gated is not None and touched:
+            try:
+                from app.nlp.signals import SentimentDirection
+
+                min_conf = getattr(self._nlp_pipeline, "_min_confidence", 0.1)
+                min_rel = getattr(self._nlp_pipeline, "_min_relevance", 0.1)
+                sentiment = getattr(classification, "sentiment", None)
+                confidence = float(getattr(classification, "confidence", 0.0) or 0.0)
+                relevance = float(getattr(classification, "relevance", 0.0) or 0.0)
+                bullish = (
+                    sentiment == SentimentDirection.BULLISH
+                    and confidence >= min_conf
+                    and relevance >= min_rel
+                )
+                bearish = sentiment == SentimentDirection.BEARISH
+                for ticker in touched:
+                    if bullish:
+                        self._news_gated.update_sentiment(ticker, True)
+                    elif bearish:
+                        self._news_gated.update_sentiment(ticker, False)
+            except Exception:
+                logger.exception("stock_news_gate_update_failed")
 
     def _build_nlp_pipeline(self) -> NlpPipeline:
         llm = build_llm_classifier(
