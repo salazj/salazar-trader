@@ -56,6 +56,25 @@ from app.strategies.base import BaseStrategy, StrategyRegistry, _import_all_stra
 logger = get_logger(__name__)
 
 
+def _block_category(reason: str) -> str:
+    """Bucket a decision-engine block reason into a stable, low-cardinality tag
+    so the per-scan heartbeat stays readable instead of logging a unique string
+    (with embedded scores) per symbol."""
+    r = reason.lower()
+    if r.startswith("final_score") or "below threshold" in r:
+        return "below_threshold"
+    if r.startswith("risk"):
+        detail = reason.split(":", 1)[1].strip() if ":" in reason else ""
+        return f"risk:{detail.split()[0]}" if detail else "risk"
+    if "llm gated" in r:
+        return "llm_gate"
+    if "regime" in r:
+        return "regime_block"
+    if "no l1" in r:
+        return "no_l1_signal"
+    return reason.split(":", 1)[0].strip()[:24] or "blocked"
+
+
 class TradingBot:
     """
     Main orchestrator. Manages the lifecycle of all components and runs
@@ -383,6 +402,10 @@ class TradingBot:
         self._regime_last_bar_ts: dict[str, Any] = {}
         # Strategies auto-paused for being net-losing (recomputed in housekeeping).
         self._stock_disabled_strategies: set[str] = set()
+        # Throttle timestamps for the intelligence-loop heartbeat logs so the
+        # operator can see why no trades fire without flooding the log.
+        self._stock_last_heartbeat_ts = 0.0
+        self._stock_last_closed_log_ts = 0.0
 
         # Hook the NLP pipeline so every classified headline updates the
         # hot-ticker tracker (drives news_driven / news_plus_movers modes)
@@ -1024,6 +1047,15 @@ class TradingBot:
                 continue
 
             if not self._settings.allow_extended_hours and not self._broker.is_market_open():
+                # Explain the silence: log once every 5 min so it's obvious the
+                # bot is alive and intentionally idle until the bell.
+                now_ts = time.time()
+                if now_ts - self._stock_last_closed_log_ts >= 300.0:
+                    self._stock_last_closed_log_ts = now_ts
+                    logger.info(
+                        "stock_market_closed_idle",
+                        hint="regular hours only; set ALLOW_EXTENDED_HOURS=true to trade pre/post market",
+                    )
                 continue
 
             # Refresh regime from SPY/QQQ — but only feed a close once per NEW
@@ -1053,6 +1085,14 @@ class TradingBot:
             spy_engine = self._stock_feature_engines.get("SPY")
             spy_ret_15 = spy_engine.recent_return(15) if spy_engine is not None else 0.0
 
+            # Per-scan tallies so the heartbeat can explain why nothing traded.
+            scan_evaluated = 0
+            scan_priced = 0
+            scan_l1_signals = 0
+            scan_actions = 0
+            scan_orders = 0
+            scan_blocks: dict[str, int] = {}
+
             # Snapshot the engine map — the universe-refresh loop can mutate it
             # while this loop awaits (quote/LLM), which would break iteration.
             for symbol, engine in list(self._stock_feature_engines.items()):
@@ -1071,6 +1111,9 @@ class TradingBot:
                         engine.update_quote(bid=bid, ask=ask, last=last)
 
                     features = engine.compute()
+                    scan_evaluated += 1
+                    if features.last_price > 0:
+                        scan_priced += 1
                     # Relative strength vs SPY over the last ~15 bars.
                     features.rel_strength_spy = engine.recent_return(15) - spy_ret_15
                     portfolio_snap = self._portfolio.get_snapshot()
@@ -1096,7 +1139,9 @@ class TradingBot:
                             best_score = score
                             best_signal = sig
                     if best_signal is None:
+                        scan_blocks["no_l1_signal"] = scan_blocks.get("no_l1_signal", 0) + 1
                         continue
+                    scan_l1_signals += 1
 
                     # L2 — ML probability of upward move.
                     ml_pred = self._stock_ml.predict(features)
@@ -1128,6 +1173,11 @@ class TradingBot:
                         broker=self._broker,
                     )
                     self._stock_decision_store.add(trace)
+                    if trace.action.value in {"buy", "sell"}:
+                        scan_actions += 1
+                    elif trace.blocked_reason:
+                        key = _block_category(trace.blocked_reason)
+                        scan_blocks[key] = scan_blocks.get(key, 0) + 1
                     # Persist only actionable or risk-blocked decisions for
                     # offline analysis / outcome labeling — skip the routine
                     # "no signal / below threshold" rows to keep DB writes light.
@@ -1148,6 +1198,7 @@ class TradingBot:
                             broker=self._broker,
                         )
                         if record is not None and record.status != "rejected":
+                            scan_orders += 1
                             self._stock_last_order_ts[symbol.upper()] = time.time()
                             if trace.action.value == "buy":
                                 self._stock_held_symbols.add(symbol.upper())
@@ -1159,6 +1210,27 @@ class TradingBot:
                 except Exception as exc:
                     logger.error("stock_loop_error", symbol=symbol, error=str(exc))
                     metrics.increment("stock_loop_errors")
+
+            # Heartbeat: once a minute, summarize the scan so it's clear what the
+            # bot saw and why it did (or didn't) trade — no more silent loops.
+            now_ts = time.time()
+            if now_ts - self._stock_last_heartbeat_ts >= 60.0:
+                self._stock_last_heartbeat_ts = now_ts
+                top_blocks = dict(
+                    sorted(scan_blocks.items(), key=lambda kv: kv[1], reverse=True)[:4]
+                )
+                logger.info(
+                    "stock_scan_summary",
+                    symbols=len(self._stock_feature_engines),
+                    evaluated=scan_evaluated,
+                    priced=scan_priced,
+                    l1_signals=scan_l1_signals,
+                    actions=scan_actions,
+                    orders=scan_orders,
+                    held=len(self._stock_held_symbols),
+                    regime=getattr(regime, "value", str(regime)) if regime else None,
+                    blocks=top_blocks,
+                )
 
     def _refresh_disabled_strategies(self) -> None:
         """Pause strategies that are net-losing after a minimum trade sample."""
