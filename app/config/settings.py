@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
+    # Market-data feed: "iex" (free) or "sip" (paid). Free/paper accounts only
+    # have IEX access; requesting SIP returns empty bars.
+    alpaca_data_feed: str = "iex"
 
     # --- Risk Limits (Prediction Markets) ---
     max_position_per_market: float = Field(default=10.0, ge=0)
