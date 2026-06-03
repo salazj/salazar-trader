@@ -176,7 +176,7 @@ async def main():
         print("  When the bot runs, it will:")
         print("    1. Fetch real headlines every 5 minutes (NewsAPI)")
         print("    2. Classify each with GPT-4o-mini (sentiment, event type, entities)")
-        print("    3. Map headlines to Kalshi markets")
+        print("    3. Map headlines to prediction markets")
         print("    4. Generate trading signals from the analysis")
 
 

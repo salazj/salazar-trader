@@ -39,6 +39,20 @@ class MarketHoursManager:
             or (_MARKET_CLOSE <= t < _AFTER_HOURS_CLOSE)
         )
 
+    def minutes_to_close(self) -> float:
+        """Minutes remaining until regular close. Returns a large number when
+        the regular session is not currently open."""
+        now_et = self._now_et()
+        if now_et.weekday() >= 5 or not (
+            _MARKET_OPEN <= now_et.time() < _MARKET_CLOSE
+        ):
+            return 1e9
+        close_dt = now_et.replace(
+            hour=_MARKET_CLOSE.hour, minute=_MARKET_CLOSE.minute,
+            second=0, microsecond=0,
+        )
+        return (close_dt - now_et).total_seconds() / 60.0
+
     def next_market_open(self) -> datetime:
         now_et = self._now_et()
         candidate = now_et.replace(

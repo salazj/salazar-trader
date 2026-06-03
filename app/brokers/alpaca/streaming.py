@@ -94,30 +94,34 @@ class AlpacaStreaming(BaseBrokerStreaming):
             return
 
         feed = DataFeed.SIP if self._feed_name == "sip" else DataFeed.IEX
-        self._stream = StockDataStream(self._api_key, self._secret_key, feed=feed)
-
-        bars = list(dict.fromkeys(self._pending_bars))
-        quotes = list(dict.fromkeys(self._pending_quotes))
-        trades = list(dict.fromkeys(self._pending_trades))
-        if bars:
-            self._stream.subscribe_bars(self._handle_bar, *bars)
-        if quotes:
-            self._stream.subscribe_quotes(self._handle_quote, *quotes)
-        if trades:
-            self._stream.subscribe_trades(self._handle_trade, *trades)
-
         self._connected = True
-        logger.info(
-            "alpaca_streaming_started",
-            bars=len(bars),
-            quotes=len(quotes),
-            trades=len(trades),
-            feed=feed.value,
-        )
+
+        def _build_stream() -> Any:
+            stream = StockDataStream(self._api_key, self._secret_key, feed=feed)
+            bars = list(dict.fromkeys(self._pending_bars))
+            quotes = list(dict.fromkeys(self._pending_quotes))
+            trades = list(dict.fromkeys(self._pending_trades))
+            if bars:
+                stream.subscribe_bars(self._handle_bar, *bars)
+            if quotes:
+                stream.subscribe_quotes(self._handle_quote, *quotes)
+            if trades:
+                stream.subscribe_trades(self._handle_trade, *trades)
+            logger.info(
+                "alpaca_streaming_started",
+                bars=len(bars),
+                quotes=len(quotes),
+                trades=len(trades),
+                feed=feed.value,
+            )
+            return stream
 
         # _run_forever() manages the socket; wrap in a retry loop so a transient
-        # disconnect doesn't kill the data feed for the rest of the session.
+        # disconnect (whether it raises or just returns) doesn't kill the data
+        # feed for the rest of the session. A fresh stream is built on each
+        # attempt and re-subscribed to the current symbol set.
         while self._connected:
+            self._stream = _build_stream()
             try:
                 await self._stream._run_forever()
             except asyncio.CancelledError:
@@ -126,9 +130,9 @@ class AlpacaStreaming(BaseBrokerStreaming):
                 if not self._connected:
                     break
                 logger.error("alpaca_streaming_error", error=str(exc))
+            if self._connected:
+                logger.warning("alpaca_streaming_reconnecting")
                 await asyncio.sleep(5)
-            else:
-                break
 
     async def disconnect(self) -> None:
         self._connected = False

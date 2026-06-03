@@ -80,6 +80,24 @@ class StockFeatures(BaseModel):
     momentum_5m: float = 0.0
     momentum_15m: float = 0.0
 
+    # Higher-timeframe context (5-minute bars aggregated from 1-minute data).
+    # htf_trend: 5m EMA-9 vs EMA-21 alignment in [-1, 1] (the dominant trend).
+    # htf_rsi: RSI-14 computed on 5m closes (slower, less noisy than 1m RSI).
+    # mtf_alignment: agreement of 1m/5m/15m momentum direction in [-1, 1]
+    # (+1 = all timeframes rising, -1 = all falling). Used to demand
+    # multi-timeframe confirmation before entering.
+    htf_trend: float = 0.0
+    htf_rsi: float = 50.0
+    mtf_alignment: float = 0.0
+
+    # Gap / session context
+    prev_close: float = 0.0
+    gap_pct: float = 0.0  # (today's open - prior close) / prior close, %
+
+    # Relative strength vs benchmark (SPY); set by the trading loop. Positive
+    # means the symbol is outperforming the index over the recent window.
+    rel_strength_spy: float = 0.0
+
 
 class StockSignal(BaseModel):
     """Signal produced by a stock strategy."""
@@ -92,6 +110,7 @@ class StockSignal(BaseModel):
     suggested_quantity: int | None = None
     order_type: OrderType = OrderType.MARKET
     stop_price: float | None = None
+    target_price: float | None = None
     rationale: str = ""
     timestamp: datetime = None  # type: ignore[assignment]
 

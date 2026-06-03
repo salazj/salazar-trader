@@ -175,6 +175,26 @@ CREATE TABLE IF NOT EXISTS api_costs (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS stock_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    strategy TEXT,
+    action TEXT NOT NULL,
+    l1_score REAL DEFAULT 0,
+    l2_score REAL DEFAULT 0,
+    l3_score REAL DEFAULT 0,
+    final_score REAL DEFAULT 0,
+    risk_approved INTEGER DEFAULT 0,
+    blocked_reason TEXT,
+    regime TEXT,
+    suggested_price REAL,
+    stop_price REAL,
+    ml_probability_up REAL,
+    llm_sentiment TEXT,
+    trace_json TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_raw_events_token ON raw_events(token_id);
 CREATE INDEX IF NOT EXISTS idx_raw_events_type ON raw_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_features_token ON features(token_id);
@@ -186,6 +206,8 @@ CREATE INDEX IF NOT EXISTS idx_nlp_events_hash ON nlp_events(content_hash);
 CREATE INDEX IF NOT EXISTS idx_nlp_events_type ON nlp_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_nlp_signals_market ON nlp_signals(market_id);
 CREATE INDEX IF NOT EXISTS idx_nlp_signals_source ON nlp_signals(source_text_id);
+CREATE INDEX IF NOT EXISTS idx_stock_decisions_ticker ON stock_decisions(ticker);
+CREATE INDEX IF NOT EXISTS idx_stock_decisions_action ON stock_decisions(action);
 """
 
 
@@ -526,6 +548,48 @@ class Repository:
         assert self._db is not None
         cursor = await self._db.execute(
             "SELECT * FROM pnl_snapshots ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        rows = await cursor.fetchall()
+        columns = [d[0] for d in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    # ── Stock decisions ───────────────────────────────────────────────
+
+    async def save_stock_decision(self, trace: dict) -> None:
+        """Persist a stock decision trace (dict form of StockDecisionTrace)."""
+        assert self._db is not None
+        await self._db.execute(
+            """INSERT INTO stock_decisions
+               (timestamp, ticker, strategy, action, l1_score, l2_score,
+                l3_score, final_score, risk_approved, blocked_reason, regime,
+                suggested_price, stop_price, ml_probability_up, llm_sentiment,
+                trace_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                trace.get("timestamp") or _to_iso(datetime.utcnow()),
+                trace.get("ticker", ""),
+                trace.get("strategy"),
+                trace.get("action", ""),
+                float(trace.get("l1_score", 0) or 0),
+                float(trace.get("l2_score", 0) or 0),
+                float(trace.get("l3_score", 0) or 0),
+                float(trace.get("final_score", 0) or 0),
+                1 if trace.get("risk_approved") else 0,
+                trace.get("blocked_reason"),
+                trace.get("regime"),
+                trace.get("suggested_price"),
+                trace.get("stop_price"),
+                trace.get("ml_probability_up"),
+                trace.get("llm_sentiment"),
+                json.dumps(trace, default=str),
+            ),
+        )
+        await self._db.commit()
+
+    async def get_stock_decisions(self, limit: int = 200) -> list[dict]:
+        assert self._db is not None
+        cursor = await self._db.execute(
+            "SELECT * FROM stock_decisions ORDER BY id DESC LIMIT ?", (limit,)
         )
         rows = await cursor.fetchall()
         columns = [d[0] for d in cursor.description]

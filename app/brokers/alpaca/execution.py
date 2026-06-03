@@ -110,6 +110,116 @@ class AlpacaExecution(BaseBrokerExecution):
             logger.error("alpaca_order_error", symbol=symbol, error=str(exc))
             raise
 
+    async def place_bracket_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        *,
+        stop_price: float | None = None,
+        take_profit_price: float | None = None,
+        order_type: OrderType = OrderType.MARKET,
+        price: float | None = None,
+        time_in_force: TimeInForce = TimeInForce.DAY,
+    ) -> dict[str, Any]:
+        """Submit an entry with broker-side protective legs.
+
+        - both stop + target  → BRACKET (entry, take-profit, stop-loss)
+        - only one leg         → OTO (entry + the single protective leg)
+        - neither              → plain entry
+        """
+        if stop_price is None and take_profit_price is None:
+            return await self.place_order(
+                symbol=symbol, side=side, quantity=quantity,
+                order_type=order_type, price=price, time_in_force=time_in_force,
+            )
+
+        if self._dry_run:
+            import uuid
+            return {
+                "id": f"dry-{uuid.uuid4().hex[:8]}",
+                "symbol": symbol, "side": side, "qty": quantity,
+                "status": "filled", "order_class": "bracket",
+                "stop_price": stop_price, "take_profit_price": take_profit_price,
+            }
+
+        client = self._ensure_client()
+        if client is None:
+            raise RuntimeError("Alpaca client not initialized")
+
+        try:
+            from alpaca.trading.requests import (
+                LimitOrderRequest,
+                MarketOrderRequest,
+                StopLossRequest,
+                TakeProfitRequest,
+            )
+            from alpaca.trading.enums import (
+                OrderClass,
+                OrderSide,
+                TimeInForce as AlpacaTIF,
+            )
+
+            alpaca_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+            alpaca_tif = AlpacaTIF.DAY
+            take_profit = (
+                TakeProfitRequest(limit_price=round(float(take_profit_price), 2))
+                if take_profit_price is not None
+                else None
+            )
+            stop_loss = (
+                StopLossRequest(stop_price=round(float(stop_price), 2))
+                if stop_price is not None
+                else None
+            )
+            order_class = (
+                OrderClass.BRACKET
+                if take_profit and stop_loss
+                else OrderClass.OTO
+            )
+
+            common = dict(
+                symbol=symbol, qty=quantity, side=alpaca_side,
+                time_in_force=alpaca_tif, order_class=order_class,
+                take_profit=take_profit, stop_loss=stop_loss,
+            )
+            if order_type == OrderType.LIMIT and price is not None:
+                req = LimitOrderRequest(limit_price=round(float(price), 2), **common)
+            else:
+                req = MarketOrderRequest(**common)
+
+            order = client.submit_order(req)
+            return {
+                "id": str(order.id),
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "qty": float(order.qty) if order.qty else quantity,
+                "status": order.status.value if order.status else "new",
+                "order_class": order_class.value,
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
+            }
+        except Exception as exc:
+            logger.error("alpaca_bracket_order_error", symbol=symbol, error=str(exc))
+            raise
+
+    async def close_position(self, symbol: str) -> dict[str, Any]:
+        if self._dry_run:
+            return {"symbol": symbol, "status": "closed"}
+        client = self._ensure_client()
+        if client is None:
+            return {"symbol": symbol, "status": "unsupported"}
+        try:
+            order = client.close_position(symbol)
+            return {
+                "symbol": symbol,
+                "id": str(getattr(order, "id", "")),
+                "status": getattr(getattr(order, "status", None), "value", "closing"),
+            }
+        except Exception as exc:
+            logger.error("alpaca_close_position_error", symbol=symbol, error=str(exc))
+            return {"symbol": symbol, "status": "error", "error": str(exc)}
+
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
         client = self._ensure_client()
         if client is None:
@@ -135,7 +245,17 @@ class AlpacaExecution(BaseBrokerExecution):
             return {}
         try:
             order = client.get_order_by_id(order_id)
-            return {"id": str(order.id), "status": order.status.value, "symbol": order.symbol}
+            return {
+                "id": str(order.id),
+                "status": order.status.value if order.status else "",
+                "symbol": order.symbol,
+                "side": order.side.value if order.side else "",
+                "qty": float(order.qty) if order.qty else 0.0,
+                "filled_qty": float(order.filled_qty) if order.filled_qty else 0.0,
+                "filled_avg_price": (
+                    float(order.filled_avg_price) if order.filled_avg_price else 0.0
+                ),
+            }
         except Exception as exc:
             logger.error("alpaca_get_order_error", error=str(exc))
             return {}

@@ -105,3 +105,46 @@ class TestNewIndicators:
         engine.update_quote(prices[-1] - 0.05, prices[-1] + 0.05, prices[-1])
         f = engine.compute()
         assert f.trend_strength > 0
+
+
+class TestMultiTimeframe:
+    def test_resample_buckets_five_minutes(self) -> None:
+        engine = StockFeatureEngine("SPY")
+        # 30 one-minute bars -> 6 five-minute buckets.
+        for b in _bars([100.0 + i * 0.1 for i in range(30)]):
+            engine.add_bar(b)
+        closes, highs, lows = engine._resample(5)
+        assert len(closes) == 6
+        assert len(highs) == len(lows) == 6
+        # Each 5m close equals the last 1m close in that bucket.
+        assert abs(closes[0] - (100.0 + 4 * 0.1)) < 1e-6
+
+    def test_htf_trend_positive_in_uptrend(self) -> None:
+        engine = StockFeatureEngine("SPY")
+        prices = [100.0 + i * 0.2 for i in range(150)]
+        for b in _bars(prices):
+            engine.add_bar(b)
+        engine.update_quote(prices[-1] - 0.05, prices[-1] + 0.05, prices[-1])
+        f = engine.compute()
+        assert f.htf_trend > 0
+        assert -1.0 <= f.htf_trend <= 1.0
+        assert 0.0 <= f.htf_rsi <= 100.0
+
+    def test_htf_trend_negative_in_downtrend(self) -> None:
+        engine = StockFeatureEngine("SPY")
+        prices = [130.0 - i * 0.2 for i in range(150)]
+        for b in _bars(prices):
+            engine.add_bar(b)
+        engine.update_quote(prices[-1] - 0.05, prices[-1] + 0.05, prices[-1])
+        f = engine.compute()
+        assert f.htf_trend < 0
+
+    def test_mtf_alignment_all_up(self) -> None:
+        engine = StockFeatureEngine("SPY")
+        prices = [100.0 + i * 0.3 for i in range(60)]
+        for b in _bars(prices):
+            engine.add_bar(b)
+        engine.update_quote(prices[-1] - 0.05, prices[-1] + 0.05, prices[-1])
+        f = engine.compute()
+        # 1m/5m/15m momentum all positive -> alignment == 1.0
+        assert f.mtf_alignment == 1.0

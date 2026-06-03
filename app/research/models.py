@@ -154,9 +154,20 @@ def calibrate_model(model: TrainedModel, X_cal: np.ndarray, y_cal: np.ndarray) -
     """Wrap the classifier in a CalibratedClassifierCV (Platt scaling).
 
     Improves probability calibration which matters for edge-based sizing.
+
+    Handles the sklearn API change where ``cv="prefit"`` was removed in favour
+    of wrapping an already-fitted estimator in ``FrozenEstimator``. Tries the
+    modern path first and falls back to the legacy ``cv="prefit"`` signature.
     """
     X_cal_t = model.pipeline.transform(X_cal)
-    cal = CalibratedClassifierCV(model.classifier, method="sigmoid", cv="prefit")
+    try:
+        from sklearn.frozen import FrozenEstimator
+
+        cal = CalibratedClassifierCV(
+            FrozenEstimator(model.classifier), method="sigmoid"
+        )
+    except ImportError:
+        cal = CalibratedClassifierCV(model.classifier, method="sigmoid", cv="prefit")
     cal.fit(X_cal_t, y_cal)
     model.classifier = cal
     return model

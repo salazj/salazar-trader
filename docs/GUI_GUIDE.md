@@ -30,10 +30,10 @@ Errors from the bot appear as a red banner at the top. The Dashboard uses toast 
 
 Configure and launch a trading session:
 
-1. **Select mode**: Three visually distinct cards for **Polymarket**, **Kalshi**, and **Stocks**. Each card has a unique color and icon with a checkmark on the selected card.
+1. **Select mode**: Two visually distinct cards for **Polymarket** and **Stocks**. Each card has a unique color and icon with a checkmark on the selected card.
 
 2. **Exchange/broker settings**: Depends on the selected mode:
-   - Polymarket/Kalshi: exchange dropdown, max tracked/subscribed markets, include/exclude categories, market slugs
+   - Polymarket: exchange dropdown, max tracked/subscribed markets, include/exclude categories, market slugs
    - Stocks: broker dropdown, universe mode (manual/filtered), tickers, sector filter, price/volume filters, extended hours toggle
 
 3. **Strategies**: Checkboxes filtered by asset class with descriptions. Custom checkbox styling with animated check marks.

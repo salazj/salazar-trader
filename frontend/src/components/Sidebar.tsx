@@ -5,6 +5,7 @@ import {
   ScrollText,
   PieChart,
   ShieldAlert,
+  Brain,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ConnectionDot } from "./ConnectionDot";
@@ -15,6 +16,7 @@ const links = [
   { to: "/config", icon: Settings, label: "Configuration" },
   { to: "/logs", icon: ScrollText, label: "Live Logs" },
   { to: "/portfolio", icon: PieChart, label: "Portfolio" },
+  { to: "/insights", icon: Brain, label: "Insights" },
   { to: "/risk", icon: ShieldAlert, label: "Risk Controls" },
 ];
 

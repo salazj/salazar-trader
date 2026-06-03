@@ -260,7 +260,7 @@ class WatchlistManager:
 
 
 def _is_live_sports(sm: ScoredMarket) -> bool:
-    """KXMVESPORTS markets are Kalshi's live sports parlays."""
+    """KXMVESPORTS markets are live sports parlays."""
     mid = sm.market_id or ""
     return mid.startswith("KXMVESPORTS")
 

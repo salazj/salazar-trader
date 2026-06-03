@@ -116,7 +116,7 @@ Key variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ASSET_CLASS` | `prediction_markets` | `prediction_markets` or `equities` |
-| `EXCHANGE` | `polymarket` | `polymarket` or `kalshi` |
+| `EXCHANGE` | `polymarket` | `polymarket` |
 | `BROKER` | `alpaca` | `alpaca` (for equities) |
 | `DRY_RUN` | `true` | Simulate trades |
 | `ENABLE_LIVE_TRADING` | `false` | Second safety gate |

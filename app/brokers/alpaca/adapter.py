@@ -56,6 +56,9 @@ class AlpacaAdapter(BaseBrokerAdapter):
     def next_market_close(self) -> datetime:
         return self._hours.next_market_close()
 
+    def minutes_to_close(self) -> float:
+        return self._hours.minutes_to_close()
+
     async def close(self) -> None:
         await self._streaming.disconnect()
         await self._execution.close()

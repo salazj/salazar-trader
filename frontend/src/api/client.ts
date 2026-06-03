@@ -4,11 +4,14 @@ import type {
   FillItem,
   LogEntry,
   OrderItem,
+  PerformanceSummary,
   PnLHistoryItem,
   Portfolio,
+  RegimeReading,
   RiskState,
   RunConfig,
   ServiceStats,
+  StockDecisionTrace,
   StrategyInfo,
   ValidationResult,
 } from "./types";
@@ -92,6 +95,12 @@ export const api = {
 
   getExchanges: () => request<ExchangeInfo[]>("/api/exchanges"),
   getStrategies: () => request<StrategyInfo[]>("/api/strategies"),
-  getCategories: (exchange = "kalshi") =>
+  getCategories: (exchange = "polymarket") =>
     request<string[]>(`/api/exchanges/categories?exchange=${exchange}`),
+
+  getRecentDecisions: (limit = 50) =>
+    request<StockDecisionTrace[]>(`/api/decisions/recent?limit=${limit}`),
+  getCurrentRegime: () => request<RegimeReading>("/api/regime/current"),
+  getPerformanceSummary: () =>
+    request<PerformanceSummary>("/api/performance/summary"),
 };

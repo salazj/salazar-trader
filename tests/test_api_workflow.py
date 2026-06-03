@@ -94,7 +94,7 @@ class TestConfigWorkflow:
     def test_validate_invalid_decision_mode(self, client):
         resp = client.post("/api/config/validate", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": True,
             "decision_mode": "yolo",
         })
@@ -106,7 +106,7 @@ class TestConfigWorkflow:
     def test_validate_warns_on_weight_sum(self, client):
         resp = client.post("/api/config/validate", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": True,
             "ensemble_weight_l1": 0.5,
             "ensemble_weight_l2": 0.5,
@@ -192,7 +192,7 @@ class TestBotLifecycle:
     def test_live_start_requires_all_gates(self, client):
         resp = client.post("/api/bot/start", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": False,
             "enable_live_trading": True,
             "live_trading_acknowledged": False,
@@ -203,7 +203,7 @@ class TestBotLifecycle:
     def test_restart_when_stopped(self, client):
         resp = client.post("/api/bot/restart", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": True,
         })
         # Restart involves start, which may fail if the TradingBot can't
@@ -299,15 +299,15 @@ class TestLogsEndpoint:
 
 
 class TestExchangeListing:
-    def test_exchanges_has_all_three(self, client):
+    def test_exchanges_has_all(self, client):
         resp = client.get("/api/exchanges")
         assert resp.status_code == 200
         data = resp.json()
         ids = {e["id"] for e in data}
-        assert ids == {"polymarket", "kalshi", "alpaca"}
+        assert ids == {"polymarket", "alpaca"}
         pm_exchanges = [e for e in data if e["asset_class"] == "prediction_markets"]
         eq_exchanges = [e for e in data if e["asset_class"] == "equities"]
-        assert len(pm_exchanges) == 2
+        assert len(pm_exchanges) == 1
         assert len(eq_exchanges) == 1
 
     def test_exchange_config_fields(self, client):

@@ -166,17 +166,15 @@ class BotManager:
                 return self._cached_balance
             try:
                 settings = get_settings()
-                if settings.has_kalshi_credentials:
-                    from app.exchanges.kalshi.execution import KalshiExecutionClient
-                    client = KalshiExecutionClient(settings)
-                    try:
-                        balance = await client.get_balance()
-                        self._cached_balance = balance
-                        self._balance_fetched_at = time.time()
-                        logger.info("idle_balance_fetched", balance=balance)
-                        return balance
-                    finally:
-                        await client.close()
+                if settings.has_alpaca_credentials:
+                    from app.brokers.alpaca.execution import AlpacaExecution
+                    client = AlpacaExecution(settings)
+                    account = await client.get_account()
+                    balance = float(account.get("portfolio_value", 0.0))
+                    self._cached_balance = balance
+                    self._balance_fetched_at = time.time()
+                    logger.info("idle_balance_fetched", balance=balance)
+                    return balance
                 return 0.0
             except Exception as e:
                 logger.warning("idle_balance_fetch_error", error=str(e))
@@ -462,7 +460,7 @@ class BotManager:
             errors.append(f"Invalid asset_class: {config.asset_class}")
 
         if config.asset_class == "prediction_markets":
-            if config.exchange not in ("polymarket", "kalshi"):
+            if config.exchange not in ("polymarket",):
                 errors.append(f"Invalid exchange: {config.exchange}")
         elif config.asset_class == "equities":
             if config.broker not in ("alpaca",):
@@ -494,9 +492,6 @@ class BotManager:
             if config.asset_class == "equities":
                 if not env_settings.has_alpaca_credentials:
                     errors.append("Missing Alpaca API credentials in .env")
-            elif config.exchange == "kalshi":
-                if not env_settings.has_kalshi_credentials:
-                    errors.append("Missing Kalshi credentials in .env")
             else:
                 if not env_settings.has_polymarket_credentials:
                     errors.append("Missing Polymarket credentials in .env")

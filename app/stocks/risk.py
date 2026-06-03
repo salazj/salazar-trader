@@ -124,12 +124,18 @@ class StockRiskManager:
         broker: BaseBrokerAdapter | None = None,
         stop_price: float | None = None,
         bar_timestamp: datetime | None = None,
+        commit: bool = True,
     ) -> StockRiskCheckResult:
         """Run all deterministic safety checks for a single order.
 
         Returns ``StockRiskCheckResult(approved=True)`` only when every
         gate passes. ``checks`` lists the gates evaluated, useful for
         the decision trace.
+
+        ``commit`` controls the side effects: when ``False`` (a preview, e.g.
+        the decision engine's gate) the daily-trade counter and order-frequency
+        timestamps are NOT mutated, so only the real submit path (execution
+        engine, ``commit=True``) consumes those budgets — avoids double counting.
         """
         checks: list[str] = []
         symbol_upper = symbol.upper()
@@ -221,9 +227,8 @@ class StockRiskManager:
 
             checks.append("order_frequency")
             now = time.time()
-            self._order_timestamps.append(now)
             recent = [t for t in self._order_timestamps if now - t < 60]
-            if len(recent) > self._max_orders_per_minute:
+            if len(recent) >= self._max_orders_per_minute:
                 return self._deny("Order frequency limit exceeded", checks)
 
             checks.append("market_hours")
@@ -253,8 +258,13 @@ class StockRiskManager:
                     checks,
                 )
 
-            if side.upper() == "BUY":
-                self._trades_today += 1
+            # Only consume budgets on the real submit path (commit=True), not on
+            # the decision engine's preview gate — otherwise each trade is
+            # counted twice and the daily/per-minute caps trip prematurely.
+            if commit:
+                self._order_timestamps.append(now)
+                if side.upper() == "BUY":
+                    self._trades_today += 1
 
             return StockRiskCheckResult(approved=True, checks=checks)
 

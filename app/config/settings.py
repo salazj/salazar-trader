@@ -72,14 +72,6 @@ class Settings(BaseSettings):
     poly_api_secret: str = ""
     poly_passphrase: str = ""
 
-    # --- Kalshi API ---
-    kalshi_api_key: str = ""
-    kalshi_private_key: str = ""
-    kalshi_private_key_path: str = ""
-    kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
-    kalshi_ws_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
-    kalshi_demo_mode: bool = True
-
     # --- Alpaca (Stock Broker) ---
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
@@ -218,9 +210,31 @@ class Settings(BaseSettings):
     stock_max_portfolio_dollars: float = Field(default=250.0, ge=0)
     stock_max_daily_loss_dollars: float = Field(default=25.0, ge=0)
     stock_max_open_positions: int = Field(default=3, ge=1)
+    # Risk-based position sizing: dollars risked per trade (entry→stop distance).
+    # When > 0 and a stop is known, quantity = risk_dollars / per-share-risk,
+    # capped by max position notional and available cash. 0 = fixed-notional.
+    stock_risk_per_trade_dollars: float = Field(default=10.0, ge=0)
+    # Liquidity gate for the movers screener: reject names whose bid/ask spread
+    # exceeds this many basis points (illiquid → bad fills). 0 = disabled.
+    stock_max_spread_bps: float = Field(default=50.0, ge=0)
     stock_max_orders_per_minute: int = Field(default=3, ge=1)
     stock_max_trades_per_day: int = Field(default=5, ge=1)
+    # Per-symbol cooldown (seconds) after submitting an order, to stop the
+    # intelligence loop from firing duplicate orders on a persistent signal.
+    stock_order_cooldown_seconds: float = Field(default=300.0, ge=0)
     stock_require_stop_loss: bool = True
+    # --- Position management (live exits beyond the broker bracket) ---
+    # Flatten all positions this many minutes before the regular close (0=off).
+    stock_eod_flatten_minutes: float = Field(default=10.0, ge=0)
+    # Time-stop: close a position open longer than this many minutes (0=off).
+    stock_max_holding_minutes: float = Field(default=240.0, ge=0)
+    # Bot-side trailing stop: once in profit, exit if price falls this fraction
+    # from its peak since entry (0=off; complements the broker stop).
+    stock_trailing_stop_pct: float = Field(default=0.0, ge=0, le=1)
+    # Self-tuning: pause a strategy that is net-losing after a minimum sample of
+    # closed trades (re-enabled on the next UTC day / restart).
+    stock_strategy_auto_disable: bool = True
+    stock_strategy_min_trades_eval: int = Field(default=8, ge=1)
     # Revenge-trading guard: block new entries on the same symbol after N
     # consecutive losing exits within a session.
     stock_max_consecutive_losses_per_symbol: int = Field(default=2, ge=1)
@@ -231,8 +245,11 @@ class Settings(BaseSettings):
     stock_l1_weight: float = Field(default=0.50, ge=0.0, le=1.0)
     stock_l2_weight: float = Field(default=0.30, ge=0.0, le=1.0)
     stock_l3_weight: float = Field(default=0.20, ge=0.0, le=1.0)
-    # Final-score threshold below which trades are blocked.
-    stock_min_final_score: float = Field(default=0.55, ge=0.0, le=1.0)
+    # Final-score threshold below which trades are blocked. With dynamic weight
+    # renormalization (inactive ML/LLM layers don't consume budget), a clean L1
+    # signal must reach this confidence on its own; 0.50 keeps decent selectivity
+    # while letting momentum/breakout setups through when ML/LLM are disabled.
+    stock_min_final_score: float = Field(default=0.50, ge=0.0, le=1.0)
 
     # --- Local LLM (Jetson Orin Nano oriented) ---
     # Provider: "none", "llama_cpp", "ollama", "hosted_api" (compat shim)
@@ -295,7 +312,7 @@ class Settings(BaseSettings):
     @field_validator("exchange")
     @classmethod
     def validate_exchange(cls, v: str) -> str:
-        allowed = {"polymarket", "kalshi"}
+        allowed = {"polymarket"}
         v = v.lower()
         if v not in allowed:
             raise ValueError(f"exchange must be one of {allowed}")
@@ -355,10 +372,6 @@ class Settings(BaseSettings):
         return bool(self.private_key and self.poly_api_key and self.poly_api_secret)
 
     @property
-    def has_kalshi_credentials(self) -> bool:
-        return bool(self.kalshi_api_key and (self.kalshi_private_key or self.kalshi_private_key_path))
-
-    @property
     def has_alpaca_credentials(self) -> bool:
         return bool(self.alpaca_api_key and self.alpaca_secret_key)
 
@@ -381,8 +394,6 @@ class Settings(BaseSettings):
     def has_credentials(self) -> bool:
         if self.asset_class == "equities":
             return self.has_alpaca_credentials
-        if self.exchange == "kalshi":
-            return self.has_kalshi_credentials
         return self.has_polymarket_credentials
 
     def require_live_trading(self) -> None:
@@ -400,16 +411,10 @@ class Settings(BaseSettings):
                 "This is a deliberate third safety gate."
             )
         if not self.has_credentials:
-            if self.exchange == "kalshi":
-                raise RuntimeError(
-                    "Kalshi live trading requires KALSHI_API_KEY and "
-                    "KALSHI_PRIVATE_KEY_PATH to be set in .env"
-                )
-            else:
-                raise RuntimeError(
-                    "Polymarket live trading requires PRIVATE_KEY, POLY_API_KEY, "
-                    "POLY_API_SECRET, and POLY_PASSPHRASE to be set in .env"
-                )
+            raise RuntimeError(
+                "Polymarket live trading requires PRIVATE_KEY, POLY_API_KEY, "
+                "POLY_API_SECRET, and POLY_PASSPHRASE to be set in .env"
+            )
 
     def require_credentials(self) -> None:
         """Backwards-compatible alias — delegates to full check."""
@@ -419,7 +424,7 @@ class Settings(BaseSettings):
         """Override repr to redact secrets — replaces secret values with ``***``."""
         _SECRETS = {
             "private_key", "poly_api_key", "poly_api_secret", "poly_passphrase",
-            "llm_api_key", "kalshi_api_key", "kalshi_private_key", "kalshi_private_key_path",
+            "llm_api_key",
             "newsapi_key", "alpaca_api_key", "alpaca_secret_key",
             "claude_api_key", "finnhub_api_key", "betstack_api_key",
         }

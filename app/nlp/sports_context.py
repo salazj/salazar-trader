@@ -1,5 +1,5 @@
 """
-SportsContextCache — matches Kalshi market questions to live BetStack events.
+SportsContextCache — matches prediction-market questions to live BetStack events.
 
 Stores the latest sports event data (scores, odds) and provides fuzzy
 matching so the LLM analyzers can inject real-time sports context into
@@ -250,14 +250,14 @@ class SportsEvent:
 
 @dataclass
 class SportsContext:
-    """Matched sports context for a Kalshi market."""
+    """Matched sports context for a prediction market."""
     event: SportsEvent
     match_score: float
     prompt_text: str
 
 
 class SportsContextCache:
-    """Stores latest BetStack events and fuzzy-matches them to Kalshi markets."""
+    """Stores latest BetStack events and fuzzy-matches them to prediction markets."""
 
     def __init__(self) -> None:
         self._events: list[SportsEvent] = []
@@ -397,12 +397,12 @@ class SportsContextCache:
                     lines.append(f"- Over/under total: {total}")
 
                 if yes_price > 0:
-                    kalshi_pct = yes_price * 100
+                    market_pct = yes_price * 100
                     lines.append(
-                        f"- Kalshi YES price implies {kalshi_pct:.0f}% probability"
+                        f"- Market YES price implies {market_pct:.0f}% probability"
                     )
-                    edge_home = (home_prob * 100) - kalshi_pct
-                    edge_away = (away_prob * 100) - kalshi_pct
+                    edge_home = (home_prob * 100) - market_pct
+                    edge_away = (away_prob * 100) - market_pct
                     if abs(edge_home) > 5 or abs(edge_away) > 5:
                         lines.append(
                             f"- Potential edge vs sportsbook consensus: "
@@ -418,7 +418,7 @@ class SportsContextCache:
         question: str,
         yes_price: float,
     ) -> dict[str, Any] | None:
-        """Create a directional signal from sportsbook odds vs Kalshi price.
+        """Create a directional signal from sportsbook odds vs market price.
 
         Returns a dict with direction (+1 buy, -1 sell), confidence, and
         rationale — or None if no match or no actionable edge exists.
@@ -454,7 +454,7 @@ class SportsContextCache:
                 confidence=round(confidence, 3),
                 edge_pp=0.0,
                 consensus=0.0,
-                kalshi_price=round(yes_price, 3),
+                market_price=round(yes_price, 3),
                 live=ev.is_live,
             )
             return {
@@ -508,7 +508,7 @@ class SportsContextCache:
             confidence = min(0.90, confidence + 0.10)
 
         rationale = (
-            f"Sportsbook consensus: {consensus_prob*100:.0f}% vs Kalshi {yes_price*100:.0f}% "
+            f"Sportsbook consensus: {consensus_prob*100:.0f}% vs market {yes_price*100:.0f}% "
             f"({abs_edge*100:.0f}pp edge). "
             f"{ev.away_team} @ {ev.home_team}"
         )
@@ -522,7 +522,7 @@ class SportsContextCache:
             confidence=round(confidence, 3),
             edge_pp=round(abs_edge * 100, 1),
             consensus=round(consensus_prob, 3),
-            kalshi_price=round(yes_price, 3),
+            market_price=round(yes_price, 3),
             live=ev.is_live,
         )
 

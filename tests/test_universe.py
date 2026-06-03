@@ -262,9 +262,9 @@ class TestMarketFilterCategories:
 class TestMarketFilterExchange:
     def test_excluded_exchange_rejected(self) -> None:
         f = MarketFilter(FilterConfig(
-            excluded_exchanges={"kalshi"}, min_liquidity=0, min_orderbook_depth=0,
+            excluded_exchanges={"polymarket"}, min_liquidity=0, min_orderbook_depth=0,
         ))
-        market = _make_market(exchange="kalshi")
+        market = _make_market(exchange="polymarket")
         result = f.apply_all(market, market_metadata={"volume": 100})
         assert not result.passed
         assert "exchange_excluded" in result.reason

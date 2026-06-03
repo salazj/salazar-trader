@@ -19,13 +19,27 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from app.monitoring import get_logger
 from app.stocks.models import StockBar, StockFeatures
 from app.utils.helpers import utc_now
 
 logger = get_logger(__name__)
+
+try:
+    from zoneinfo import ZoneInfo
+
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - fallback if tzdata missing
+    _ET = timezone(timedelta(hours=-5))
+
+
+def _et_date(ts: datetime) -> date:
+    """ET calendar date for a timestamp (used to anchor the trading session)."""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(_ET).date()
 
 
 class StockFeatureEngine:
@@ -38,12 +52,38 @@ class StockFeatureEngine:
         self._high_of_day: float = 0.0
         self._low_of_day: float = float("inf")
         self._day_volume: int = 0
-        self._day_start: datetime | None = None
+        self._session_date: date | None = None
+        # Session-anchored VWAP accumulators (typical price × volume).
+        self._session_pv: float = 0.0
+        self._session_v: int = 0
+        # Gap tracking: prior-session close and current-session open.
+        self._prev_close: float = 0.0
+        self._session_open: float = 0.0
 
     # ── Mutation ───────────────────────────────────────────────────────
 
     def add_bar(self, bar: StockBar) -> None:
+        # Dedup / ordering guard: warmup (REST) and the live stream can both
+        # deliver the same minute. Ignore bars at or before the latest one so
+        # volume / VWAP / high-low aren't double-counted.
+        if self._bars and bar.timestamp <= self._bars[-1].timestamp:
+            return
+
+        # Auto-roll the session on a new ET calendar day so VWAP / high-low /
+        # volume re-anchor to the current session (the bar history deque is kept
+        # intact so EMA/MACD stay warm across the open).
+        bar_date = _et_date(bar.timestamp)
+        if self._session_date is None or bar_date != self._session_date:
+            # Remember the prior session's last close for gap computation.
+            if self._bars:
+                self._prev_close = self._bars[-1].close
+            self._reset_session(bar_date)
+            self._session_open = bar.open
+
         self._bars.append(bar)
+        typical = (bar.high + bar.low + bar.close) / 3.0
+        self._session_pv += typical * bar.volume
+        self._session_v += bar.volume
         if bar.high > self._high_of_day:
             self._high_of_day = bar.high
         if bar.low < self._low_of_day:
@@ -53,16 +93,23 @@ class StockFeatureEngine:
     def update_quote(self, bid: float, ask: float, last: float) -> None:
         self._last_quote = {"bid": bid, "ask": ask, "last": last}
 
-    def start_new_day(self) -> None:
+    def _reset_session(self, session_date: date | None) -> None:
+        self._session_date = session_date
+        self._session_pv = 0.0
+        self._session_v = 0
         self._high_of_day = 0.0
         self._low_of_day = float("inf")
         self._day_volume = 0
-        self._day_start = utc_now()
+
+    def start_new_day(self) -> None:
+        self._reset_session(_et_date(utc_now()))
 
     # ── Compute ────────────────────────────────────────────────────────
 
     def compute(self) -> StockFeatures:
-        now = utc_now()
+        # Stamp features with the latest bar time so the risk manager's data
+        # freshness gate actually reflects market-data age (not wall clock).
+        now = self._bars[-1].timestamp if self._bars else utc_now()
         closes = [b.close for b in self._bars]
         highs = [b.high for b in self._bars]
         lows = [b.low for b in self._bars]
@@ -91,6 +138,24 @@ class StockFeatureEngine:
 
         volatility_score = atr_14 / last if last > 0 else 0.0
         trend_strength = self._compute_trend_strength(ema_9, ema_21, ema_50)
+
+        gap_pct = (
+            (self._session_open - self._prev_close) / self._prev_close * 100.0
+            if self._prev_close > 0 and self._session_open > 0
+            else 0.0
+        )
+
+        # Higher-timeframe (5-minute) context aggregated from the 1m bars.
+        htf_closes, _htf_highs, _htf_lows = self._resample(5)
+        htf_ema_9 = self._ema(htf_closes, 9)
+        htf_ema_21 = self._ema(htf_closes, 21)
+        htf_trend = self._ema_alignment(htf_ema_9, htf_ema_21)
+        htf_rsi = self._compute_rsi(htf_closes, 14) if len(htf_closes) > 14 else 50.0
+
+        mom_1m = self._momentum(closes, 1)
+        mom_5m = self._momentum(closes, 5)
+        mom_15m = self._momentum(closes, 15)
+        mtf_alignment = self._mtf_alignment(mom_1m, mom_5m, mom_15m)
 
         return StockFeatures(
             symbol=self._symbol,
@@ -125,30 +190,103 @@ class StockFeatureEngine:
             bb_middle=bb_middle,
             bb_lower=bb_lower,
             bb_pct_b=bb_pct_b,
-            momentum_1m=self._momentum(closes, 1),
-            momentum_5m=self._momentum(closes, 5),
-            momentum_15m=self._momentum(closes, 15),
+            momentum_1m=mom_1m,
+            momentum_5m=mom_5m,
+            momentum_15m=mom_15m,
+            htf_trend=htf_trend,
+            htf_rsi=htf_rsi,
+            mtf_alignment=mtf_alignment,
+            prev_close=self._prev_close,
+            gap_pct=gap_pct,
         )
+
+    def recent_return(self, lookback_bars: int) -> float:
+        """Return over the last ``lookback_bars`` 1-minute closes (fraction)."""
+        if len(self._bars) <= lookback_bars:
+            return 0.0
+        prev = self._bars[-lookback_bars - 1].close
+        if prev <= 0:
+            return 0.0
+        return (self._bars[-1].close - prev) / prev
+
+    # ── Multi-timeframe aggregation ────────────────────────────────────
+
+    def _resample(self, period_min: int) -> tuple[list[float], list[float], list[float]]:
+        """Aggregate the 1-minute bar history into ``period_min`` OHLC buckets.
+
+        Bars are bucketed by wall-clock time (epoch // period) so the boundaries
+        are stable and deterministic regardless of gaps in the stream. Returns
+        ``(closes, highs, lows)`` per completed/partial bucket in chronological
+        order — the last bucket may be in-progress, which is fine for a trend
+        read.
+        """
+        if not self._bars:
+            return [], [], []
+        bucket_seconds = period_min * 60
+        closes: list[float] = []
+        highs: list[float] = []
+        lows: list[float] = []
+        cur_key: int | None = None
+        hi = lo = cl = 0.0
+        for b in self._bars:
+            ts = b.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            key = int(ts.timestamp() // bucket_seconds)
+            if key != cur_key:
+                if cur_key is not None:
+                    closes.append(cl)
+                    highs.append(hi)
+                    lows.append(lo)
+                cur_key = key
+                hi, lo, cl = b.high, b.low, b.close
+            else:
+                hi = max(hi, b.high)
+                lo = min(lo, b.low)
+                cl = b.close
+        if cur_key is not None:
+            closes.append(cl)
+            highs.append(hi)
+            lows.append(lo)
+        return closes, highs, lows
+
+    @staticmethod
+    def _ema_alignment(fast: float, slow: float) -> float:
+        """Normalize an EMA fast/slow spread into a [-1, 1] trend reading."""
+        if slow <= 0:
+            return 0.0
+        diff = (fast - slow) / slow
+        return max(-1.0, min(1.0, diff * 100.0))
+
+    @staticmethod
+    def _mtf_alignment(m1: float, m5: float, m15: float) -> float:
+        """Agreement of 1m/5m/15m momentum direction in [-1, 1]."""
+        signs = [1 if m > 0 else (-1 if m < 0 else 0) for m in (m1, m5, m15)]
+        return sum(signs) / 3.0
 
     # ── Indicator primitives ───────────────────────────────────────────
 
     def _compute_vwap(self) -> float:
-        if not self._bars:
-            return 0.0
-        total_pv = sum(b.close * b.volume for b in self._bars)
-        total_v = sum(b.volume for b in self._bars)
-        return total_pv / total_v if total_v > 0 else 0.0
+        """Session-anchored VWAP (typical price × volume since the open)."""
+        if self._session_v > 0:
+            return self._session_pv / self._session_v
+        # Fallback before any session volume: last close.
+        return self._bars[-1].close if self._bars else 0.0
 
     @staticmethod
     def _compute_rsi(closes: list[float], period: int) -> float:
+        """Wilder-smoothed RSI."""
         if len(closes) < period + 1:
             return 50.0
         deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
-        recent = deltas[-period:]
-        gains = [d for d in recent if d > 0]
-        losses = [-d for d in recent if d < 0]
-        avg_gain = sum(gains) / period if gains else 0.0
-        avg_loss = sum(losses) / period if losses else 0.0
+        gains = [max(d, 0.0) for d in deltas]
+        losses = [max(-d, 0.0) for d in deltas]
+        # Seed with the simple average of the first `period`, then Wilder-smooth.
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+        for i in range(period, len(deltas)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
         if avg_loss == 0:
             return 100.0
         rs = avg_gain / avg_loss
@@ -218,6 +356,7 @@ class StockFeatureEngine:
     def _compute_atr(
         highs: list[float], lows: list[float], closes: list[float], period: int
     ) -> float:
+        """Wilder-smoothed ATR."""
         if len(closes) < 2:
             return 0.0
         trs: list[float] = []
@@ -230,7 +369,10 @@ class StockFeatureEngine:
             trs.append(tr)
         if len(trs) < period:
             return sum(trs) / len(trs) if trs else 0.0
-        return sum(trs[-period:]) / period
+        atr = sum(trs[:period]) / period
+        for i in range(period, len(trs)):
+            atr = (atr * (period - 1) + trs[i]) / period
+        return atr
 
     @staticmethod
     def _compute_volatility(closes: list[float], window: int) -> float:

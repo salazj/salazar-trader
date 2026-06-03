@@ -108,6 +108,44 @@ class TestStockDecisionEngine:
         assert trace.final_score > 0.3
         assert trace.stop_price == 95.0
 
+    def test_l1_alone_can_trade_when_ml_and_llm_absent(self) -> None:
+        # With ML stub (confidence 0) and LLM disabled (neutral, no adjustment),
+        # weights renormalize onto L1 so a strong signal still clears the gate.
+        s = _settings(stock_min_final_score=0.55)
+        eng = StockDecisionEngine(s, risk_manager=StockRiskManager(s))
+        trace = eng.evaluate(
+            "NVDA",
+            _features(),
+            _portfolio(),
+            l1_signal=_signal(confidence=0.7),
+            ml_prediction=StockMLPrediction(
+                ticker="NVDA", probability_up=0.5, confidence=0.0
+            ),
+            llm_verdict=safe_default_verdict("NVDA"),
+        )
+        # final ≈ L1 confidence (0.7) because L2/L3 weight is redistributed.
+        assert trace.final_score >= 0.55
+        assert trace.action == StockDecisionAction.BUY
+        assert trace.weights["l1"] == 1.0
+
+    def test_bearish_ml_vetoes_long_via_signed_gate(self) -> None:
+        # A strong L1 BUY but a confidently bearish ML read should drag the
+        # signed final score below the threshold and block the long.
+        s = _settings(stock_min_final_score=0.50)
+        eng = StockDecisionEngine(s, risk_manager=StockRiskManager(s))
+        trace = eng.evaluate(
+            "NVDA",
+            _features(),
+            _portfolio(),
+            l1_signal=_signal(confidence=0.8),
+            ml_prediction=StockMLPrediction(
+                ticker="NVDA", probability_up=0.05, confidence=0.9
+            ),
+            llm_verdict=safe_default_verdict("NVDA"),
+        )
+        assert trace.action == StockDecisionAction.BLOCKED
+        assert "below threshold" in (trace.blocked_reason or "")
+
     def test_no_l1_signal_blocks(self) -> None:
         s = _settings()
         eng = StockDecisionEngine(s, risk_manager=StockRiskManager(s))

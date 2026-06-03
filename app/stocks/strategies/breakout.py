@@ -22,6 +22,9 @@ class StockBreakout(BaseStockStrategy):
     MIN_VOLUME_MULTIPLE = 1.5
     MAX_VWAP_DISTANCE_PCT = 1.5
     ATR_STOP_MULTIPLIER = 1.5
+    REWARD_RISK = 2.0
+    # Cap slippage: buy a hair above last instead of a naked market order.
+    LIMIT_BUFFER_PCT = 0.0015
 
     def generate_signal(
         self, features: StockFeatures, portfolio: PortfolioSnapshot
@@ -47,11 +50,11 @@ class StockBreakout(BaseStockStrategy):
             return None
 
         if breaking_high and volume_surge:
-            stop_price = (
-                features.last_price - features.atr_14 * self.ATR_STOP_MULTIPLIER
-                if features.atr_14 > 0
-                else None
-            )
+            last = features.last_price
+            atr = features.atr_14 if features.atr_14 > 0 else last * 0.01
+            stop_price = round(last - atr * self.ATR_STOP_MULTIPLIER, 2)
+            target_price = round(last + self.REWARD_RISK * (last - stop_price), 2)
+            limit_price = round(last * (1 + self.LIMIT_BUFFER_PCT), 2)
             confidence = min(
                 0.85,
                 0.5 + max(features.relative_volume, features.volume_surge_ratio) * 0.1,
@@ -61,14 +64,15 @@ class StockBreakout(BaseStockStrategy):
                 symbol=features.symbol,
                 action=StockAction.BUY,
                 confidence=confidence,
-                suggested_price=features.last_price,
-                order_type=OrderType.MARKET,
+                suggested_price=limit_price,
+                order_type=OrderType.LIMIT,
                 stop_price=stop_price,
+                target_price=target_price,
                 rationale=(
-                    f"High-of-day breakout at {features.last_price:.2f}, "
+                    f"High-of-day breakout at {last:.2f}, "
                     f"vol_surge={features.volume_surge_ratio:.2f}, "
                     f"rel_vol={features.relative_volume:.2f}, "
-                    f"ATR stop={stop_price:.2f}" if stop_price else "no ATR stop"
+                    f"ATR stop={stop_price:.2f}"
                 ),
             )
 

@@ -76,7 +76,7 @@ Returns the full bot session status including `session_id`.
   "status": "running",
   "session_id": "a1b2c3d4e5f6",
   "asset_class": "prediction_markets",
-  "exchange": "kalshi",
+  "exchange": "polymarket",
   "broker": "",
   "mode": "dry-run",
   "dry_run": true,
@@ -160,7 +160,7 @@ Returns a `ValidationResult`:
 
 Validation rules:
 - `asset_class` must be `prediction_markets` or `equities`
-- `exchange` must be `polymarket` or `kalshi` (when asset_class is PM)
+- `exchange` must be `polymarket` (when asset_class is PM)
 - `broker` must be `alpaca` (when asset_class is equities)
 - `decision_mode` must be `conservative`, `balanced`, or `aggressive`
 - `max_daily_loss` and `max_total_exposure` must be positive

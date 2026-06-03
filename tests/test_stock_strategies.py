@@ -44,7 +44,6 @@ def _make_portfolio(**overrides) -> PortfolioSnapshot:
 class TestMomentumStrategy:
     def test_buy_signal_on_strong_momentum(self):
         strat = StockMomentum()
-        strat._bar_count = 10
         features = _make_features(
             last_price=152.0,
             ema_9=149.0,
@@ -65,8 +64,6 @@ class TestMomentumStrategy:
 
     def test_sell_signal_on_reversal(self):
         strat = StockMomentum()
-        for _ in range(6):
-            strat._bar_count += 1
         features = _make_features(
             last_price=147.0,
             ema_9=149.0,

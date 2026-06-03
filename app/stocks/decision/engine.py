@@ -142,6 +142,24 @@ class StockDecisionEngine:
     def weights(self) -> dict[str, float]:
         return {"l1": self._w_l1, "l2": self._w_l2, "l3": self._w_l3}
 
+    def _effective_weights(
+        self, l1_active: bool, l2_active: bool, l3_active: bool
+    ) -> tuple[float, float, float]:
+        """Renormalize configured weights over only the active layers."""
+        pairs = [
+            (l1_active, self._w_l1),
+            (l2_active, self._w_l2),
+            (l3_active, self._w_l3),
+        ]
+        active_sum = sum(w for active, w in pairs if active)
+        if active_sum <= 0:
+            return self._w_l1, self._w_l2, self._w_l3
+        return (
+            self._w_l1 / active_sum if l1_active else 0.0,
+            self._w_l2 / active_sum if l2_active else 0.0,
+            self._w_l3 / active_sum if l3_active else 0.0,
+        )
+
     def evaluate(
         self,
         ticker: str,
@@ -160,10 +178,21 @@ class StockDecisionEngine:
         l2 = _l2_score(ml_prediction)
         l3 = _l3_score(verdict)
 
+        # Only layers that actually carry information consume weight budget.
+        # When the ML model is a stub (no trained artifact → confidence 0) or
+        # the LLM provider is disabled (neutral verdict, no adjustment), those
+        # layers are inactive and their weight is redistributed to the others.
+        # Without this, a strong L1 signal could never reach the threshold on
+        # its own (0.5 × 0.9 = 0.45 < 0.55) and the bot would never trade.
         adj = float(verdict.confidence_adjustment)
-        final = (
-            l1 * self._w_l1 + l2 * self._w_l2 + l3 * self._w_l3 + adj
+        l1_active = l1_signal is not None
+        l2_active = ml_prediction is not None and ml_prediction.confidence > 0.0
+        l3_active = abs(l3) > 1e-9 or adj != 0.0
+        eff_w_l1, eff_w_l2, eff_w_l3 = self._effective_weights(
+            l1_active, l2_active, l3_active
         )
+
+        final = l1 * eff_w_l1 + l2 * eff_w_l2 + l3 * eff_w_l3 + adj
         final = max(-1.0, min(1.0, final))
 
         explanation_parts: list[str] = []
@@ -190,9 +219,13 @@ class StockDecisionEngine:
             block_reason = (
                 f"regime {regime.regime.value} disallows long entries"
             )
-        elif abs(final) < self._min_score:
+        elif direction != 0 and final * direction < self._min_score:
+            # Signed gate: the fused score must AGREE with the L1 direction by
+            # at least the threshold. This lets a bearish ML/LLM read veto a
+            # long (and vice-versa) instead of only checking magnitude.
             block_reason = (
-                f"final_score {final:+.2f} below threshold {self._min_score:.2f}"
+                f"final_score {final:+.2f} (dir {direction:+d}) below "
+                f"threshold {self._min_score:.2f}"
             )
 
         if block_reason is None and l1_signal is not None:
@@ -228,6 +261,7 @@ class StockDecisionEngine:
                 broker=broker,
                 stop_price=l1_signal.stop_price,
                 bar_timestamp=features.timestamp,
+                commit=False,
             )
             if not risk_result.approved:
                 block_reason = f"risk: {risk_result.reason}"
@@ -251,7 +285,7 @@ class StockDecisionEngine:
             risk_approved=risk_approved,
             blocked_reason=block_reason,
             explanation=" | ".join(explanation_parts),
-            weights=dict(self.weights),
+            weights={"l1": eff_w_l1, "l2": eff_w_l2, "l3": eff_w_l3},
             suggested_price=l1_signal.suggested_price if l1_signal else None,
             suggested_quantity=l1_signal.suggested_quantity if l1_signal else None,
             stop_price=l1_signal.stop_price if l1_signal else None,

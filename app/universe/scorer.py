@@ -173,7 +173,7 @@ class OpportunityScorer:
         """Boost markets expiring soon — live events get highest priority.
 
         KXMVESPORTS markets get a fixed high urgency score regardless of
-        their Kalshi close_time because their actual game resolution is
+        their close_time because their actual game resolution is
         typically within hours, not the 14-day market window.
         """
         mid = market.market_id or ""

@@ -81,7 +81,8 @@ function formatInterval(seconds: number): string {
 }
 
 const SERVICE_ICONS: Record<string, React.ReactNode> = {
-  kalshi: <Wallet className="h-4 w-4 text-emerald-400" />,
+  polymarket: <Wallet className="h-4 w-4 text-emerald-400" />,
+  alpaca: <Wallet className="h-4 w-4 text-emerald-400" />,
   gpt4o: <Brain className="h-4 w-4 text-emerald-400" />,
   claude: <Brain className="h-4 w-4 text-violet-400" />,
   newsapi: <Newspaper className="h-4 w-4 text-sky-400" />,
@@ -572,7 +573,7 @@ export default function Dashboard() {
                     )}
                   </div>
                 )}
-                {/* Kalshi detail row */}
+                {/* Exchange detail row */}
                 {svc.type === "exchange" && svc.balance_label && (
                   <div className="mt-1 text-[11px] text-muted-foreground">{svc.balance_label}</div>
                 )}

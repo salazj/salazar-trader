@@ -20,7 +20,7 @@ class TestLiveSafetyGates:
     def test_dry_run_start_succeeds(self, client):
         resp = client.post("/api/bot/start", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": True,
         })
         # May succeed or fail depending on module availability, but should not
@@ -30,7 +30,7 @@ class TestLiveSafetyGates:
     def test_live_without_enable_flag_rejected(self, client):
         resp = client.post("/api/bot/start", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": False,
             "enable_live_trading": False,
             "live_trading_acknowledged": False,
@@ -41,7 +41,7 @@ class TestLiveSafetyGates:
     def test_live_without_ack_rejected(self, client):
         resp = client.post("/api/bot/start", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": False,
             "enable_live_trading": True,
             "live_trading_acknowledged": False,

@@ -1,7 +1,7 @@
 """
-Cross-exchange tests proving the same strategy, decision engine, risk manager,
-feature engine, orderbook manager, and portfolio tracker all work identically
-on both Polymarket and Kalshi normalized data.
+Exchange-agnostic tests proving the same strategy, decision engine, risk manager,
+feature engine, orderbook manager, and portfolio tracker all work on normalized
+Polymarket data.
 
 This file contains no exchange-specific imports — every test uses only the
 normalized domain models.
@@ -42,45 +42,24 @@ from app.risk.manager import RiskManager
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Fixtures — Polymarket and Kalshi normalized data side by side
+# Fixtures — normalized Polymarket data
 # ═══════════════════════════════════════════════════════════════════════
 
-EXCHANGES = ["polymarket", "kalshi"]
+EXCHANGES = ["polymarket"]
 
 
-def _make_market(exchange: str) -> Market:
-    if exchange == "polymarket":
-        return Market(
-            condition_id="0xabc123",
-            market_id="0xabc123",
-            question="Will BTC exceed $100k?",
-            slug="btc-100k",
-            tokens=[
-                MarketToken(token_id="tok-yes-123", instrument_id="tok-yes-123", outcome="Yes"),
-                MarketToken(token_id="tok-no-456", instrument_id="tok-no-456", outcome="No"),
-            ],
-            exchange="polymarket",
-        )
-    else:
-        return Market(
-            condition_id="KXBTCD-26MAR14-B100000",
-            market_id="KXBTCD-26MAR14-B100000",
-            question="Will Bitcoin be above $100,000?",
-            slug="kxbtcd-26mar14-b100000",
-            tokens=[
-                MarketToken(
-                    token_id="KXBTCD-26MAR14-B100000",
-                    instrument_id="KXBTCD-26MAR14-B100000",
-                    outcome="Yes",
-                ),
-                MarketToken(
-                    token_id="KXBTCD-26MAR14-B100000-no",
-                    instrument_id="KXBTCD-26MAR14-B100000-no",
-                    outcome="No",
-                ),
-            ],
-            exchange="kalshi",
-        )
+def _make_market(exchange: str = "polymarket") -> Market:
+    return Market(
+        condition_id="0xabc123",
+        market_id="0xabc123",
+        question="Will BTC exceed $100k?",
+        slug="btc-100k",
+        tokens=[
+            MarketToken(token_id="tok-yes-123", instrument_id="tok-yes-123", outcome="Yes"),
+            MarketToken(token_id="tok-no-456", instrument_id="tok-no-456", outcome="No"),
+        ],
+        exchange="polymarket",
+    )
 
 
 def _make_book(exchange: str) -> OrderbookSnapshot:
@@ -269,11 +248,11 @@ class TestOrderbookManagerCrossExchange:
         assert snap is not None
         assert snap.best_bid == 0.55
 
-    def test_both_exchanges_coexist(self):
+    def test_multiple_instruments_coexist(self):
         mgr = OrderbookManager()
-        for exchange in EXCHANGES:
-            market = _make_market(exchange)
-            iid = market.tokens[0].instrument_id
+        market = _make_market()
+        for token in market.tokens:
+            iid = token.instrument_id
             mgr.apply_snapshot(
                 market_id=market.market_id,
                 instrument_id=iid,

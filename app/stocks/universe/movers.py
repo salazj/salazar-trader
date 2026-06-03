@@ -167,8 +167,23 @@ class TopMoversScreener:
         if dollar_volume < self._min_dollar_volume:
             return None
 
+        # Liquidity gate: skip names with a wide quoted spread (bad fills).
+        max_spread_bps = float(getattr(self._settings, "stock_max_spread_bps", 0) or 0)
+        if max_spread_bps > 0:
+            quote = getattr(snap, "latest_quote", None)
+            bid = float(getattr(quote, "bid_price", 0.0) or 0.0) if quote else 0.0
+            ask = float(getattr(quote, "ask_price", 0.0) or 0.0) if quote else 0.0
+            if bid > 0 and ask > 0:
+                mid = (bid + ask) / 2.0
+                spread_bps = (ask - bid) / mid * 10_000.0 if mid > 0 else 1e9
+                if spread_bps > max_spread_bps:
+                    return None
+
         pct_change = (price - open_) / open_
-        score = abs(pct_change) * math.sqrt(max(dollar_volume, 1.0) / 1_000_000.0)
+        # Cap the move term so we rank unusual *liquid* activity rather than
+        # only chasing the most parabolic (already-extended) names.
+        capped_move = min(abs(pct_change), 0.15)
+        score = capped_move * math.sqrt(max(dollar_volume, 1.0) / 1_000_000.0)
         return MoverEntry(
             ticker=ticker,
             last_price=price,

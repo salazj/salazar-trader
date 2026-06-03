@@ -5,6 +5,8 @@ Conditions for a BUY:
 * RSI-14 below the overbought threshold
 * 5-minute momentum positive and above ``MOMENTUM_THRESHOLD``
 * Volume confirmation: ``volume_surge_ratio`` >= ``MIN_VOLUME_SURGE``
+* Higher-timeframe confirmation: not fighting the 5-minute trend
+  (``htf_trend`` >= 0), avoiding longs into a higher-timeframe downtrend
 * ATR-based stop loss attached to the signal
 """
 
@@ -24,25 +26,33 @@ class StockMomentum(BaseStockStrategy):
     RSI_OVERSOLD = 30.0
     MIN_VOLUME_SURGE = 1.2
     ATR_STOP_MULTIPLIER = 1.5
+    REWARD_RISK = 2.0
     COOLDOWN_BARS = 5
 
     def __init__(self) -> None:
         self._last_signal_bar: dict[str, int] = {}
-        self._bar_count: int = 0
+        # Per-symbol tick counter so the cooldown is independent of how many
+        # symbols share the loop (a single global counter made COOLDOWN_BARS
+        # effectively num_symbols× shorter).
+        self._bar_count: dict[str, int] = {}
 
     def generate_signal(
         self, features: StockFeatures, portfolio: PortfolioSnapshot
     ) -> StockSignal | None:
-        self._bar_count += 1
         symbol = features.symbol
+        count = self._bar_count.get(symbol, 0) + 1
+        self._bar_count[symbol] = count
 
-        last_bar = self._last_signal_bar.get(symbol, 0)
-        if self._bar_count - last_bar < self.COOLDOWN_BARS:
+        last_bar = self._last_signal_bar.get(symbol, -self.COOLDOWN_BARS)
+        if count - last_bar < self.COOLDOWN_BARS:
             return None
 
         if features.last_price <= 0 or features.ema_9 <= 0:
             return None
 
+        # Trend confirmation: short-term EMA above medium-term EMA (matches the
+        # documented behavior and filters counter-trend longs).
+        ema_uptrend = features.ema_21 <= 0 or features.ema_9 > features.ema_21
         price_above_ema = features.last_price > features.ema_9
         price_above_vwap = (
             features.vwap <= 0 or features.last_price >= features.vwap
@@ -53,27 +63,39 @@ class StockMomentum(BaseStockStrategy):
             features.volume_surge_ratio >= self.MIN_VOLUME_SURGE
             or features.relative_volume >= self.MIN_VOLUME_SURGE
         )
+        # Don't chase a 1m pop into a 5m downtrend. htf_trend is 0.0 until
+        # enough bars exist, so this is permissive early in the session.
+        htf_ok = features.htf_trend >= 0.0
 
-        if price_above_ema and price_above_vwap and momentum_strong and rsi_ok and volume_ok:
+        if (
+            ema_uptrend and price_above_ema and price_above_vwap
+            and momentum_strong and rsi_ok and volume_ok and htf_ok
+        ):
+            # Base confidence on 1m thrust, with a bonus when all three
+            # timeframes (1m/5m/15m) agree on direction.
             confidence = min(0.9, 0.5 + features.momentum_5m * 10)
-            self._last_signal_bar[symbol] = self._bar_count
-            stop = (
-                features.last_price - features.atr_14 * self.ATR_STOP_MULTIPLIER
-                if features.atr_14 > 0
-                else None
-            )
+            if features.mtf_alignment > 0:
+                confidence = min(0.95, confidence + 0.1 * features.mtf_alignment)
+            self._last_signal_bar[symbol] = count
+            last = features.last_price
+            atr = features.atr_14 if features.atr_14 > 0 else last * 0.01
+            stop = last - atr * self.ATR_STOP_MULTIPLIER
+            target = last + self.REWARD_RISK * (last - stop)
             return StockSignal(
                 strategy_name=self.name,
                 symbol=symbol,
                 action=StockAction.BUY,
                 confidence=confidence,
-                suggested_price=features.last_price,
+                suggested_price=last,
                 order_type=OrderType.LIMIT,
-                stop_price=stop,
+                stop_price=round(stop, 2),
+                target_price=round(target, 2),
                 rationale=(
-                    f"EMA9>VWAP, mom_5m={features.momentum_5m:.4f}, "
+                    f"EMA9>EMA21>VWAP, mom_5m={features.momentum_5m:.4f}, "
                     f"RSI={features.rsi_14:.1f}, "
-                    f"vol_surge={features.volume_surge_ratio:.2f}"
+                    f"vol_surge={features.volume_surge_ratio:.2f}, "
+                    f"htf_trend={features.htf_trend:+.2f}, "
+                    f"mtf_align={features.mtf_alignment:+.2f}"
                 ),
             )
 
@@ -82,7 +104,7 @@ class StockMomentum(BaseStockStrategy):
 
         if price_below_ema and momentum_reversed:
             confidence = min(0.8, 0.4 + abs(features.momentum_5m) * 10)
-            self._last_signal_bar[symbol] = self._bar_count
+            self._last_signal_bar[symbol] = count
             return StockSignal(
                 strategy_name=self.name,
                 symbol=symbol,

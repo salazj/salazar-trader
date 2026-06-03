@@ -67,7 +67,8 @@ class StockPullback(BaseStockStrategy):
                 confidence=confidence,
                 suggested_price=features.last_price,
                 order_type=OrderType.LIMIT,
-                stop_price=stop,
+                stop_price=round(stop, 2),
+                target_price=round(target, 2),
                 rationale=(
                     f"Uptrend pullback to {ref_level:.2f}, "
                     f"RSI={features.rsi_14:.1f}, ATR stop={stop:.2f}, "

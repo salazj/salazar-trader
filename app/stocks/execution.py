@@ -82,7 +82,9 @@ class StockExecutionEngine:
 
         side = "buy" if signal.action in (StockAction.BUY, StockAction.COVER) else "sell"
         price = signal.suggested_price or features.last_price
-        quantity = signal.suggested_quantity or self._compute_quantity(price, portfolio)
+        quantity = signal.suggested_quantity or self._compute_quantity(
+            price, portfolio, stop_price=signal.stop_price
+        )
 
         if quantity <= 0:
             return None
@@ -126,14 +128,31 @@ class StockExecutionEngine:
             )
         else:
             try:
-                result = await self._execution.place_order(
-                    symbol=signal.symbol,
-                    side=side,
-                    quantity=float(quantity),
-                    order_type=signal.order_type,
-                    price=price if signal.order_type != OrderType.MARKET else None,
-                    stop_price=signal.stop_price,
-                )
+                limit_price = price if signal.order_type != OrderType.MARKET else None
+                # Entries (BUY) go in as broker-side bracket/OTO orders so the
+                # protective stop and take-profit live at Alpaca even if the bot
+                # restarts. Exits (SELL-to-close) are plain orders.
+                if side == "buy" and (
+                    signal.stop_price is not None or signal.target_price is not None
+                ):
+                    result = await self._execution.place_bracket_order(
+                        symbol=signal.symbol,
+                        side=side,
+                        quantity=float(quantity),
+                        stop_price=signal.stop_price,
+                        take_profit_price=signal.target_price,
+                        order_type=signal.order_type,
+                        price=limit_price,
+                    )
+                else:
+                    result = await self._execution.place_order(
+                        symbol=signal.symbol,
+                        side=side,
+                        quantity=float(quantity),
+                        order_type=signal.order_type,
+                        price=limit_price,
+                        stop_price=signal.stop_price,
+                    )
                 record.broker_order_id = result.get("id", "")
                 record.status = result.get("status", "pending")
                 logger.info(
@@ -142,6 +161,9 @@ class StockExecutionEngine:
                     side=side,
                     price=price,
                     quantity=quantity,
+                    stop=signal.stop_price,
+                    target=signal.target_price,
+                    order_class=result.get("order_class", "simple"),
                     broker_id=record.broker_order_id,
                 )
             except Exception as exc:
@@ -171,11 +193,32 @@ class StockExecutionEngine:
                     count += 1
         return count
 
-    def _compute_quantity(self, price: float, portfolio: PortfolioSnapshot) -> int:
+    def _compute_quantity(
+        self,
+        price: float,
+        portfolio: PortfolioSnapshot,
+        *,
+        stop_price: float | None = None,
+    ) -> int:
         if price <= 0:
             return 0
+        # Notional cap: never risk more than max-position $ or 25% of cash.
         max_dollars = min(
             self._settings.stock_max_position_dollars,
             portfolio.cash * 0.25,
         )
-        return max(1, int(max_dollars / price))
+        notional_cap_shares = int(max_dollars / price)
+
+        # Volatility/risk-based sizing: size so the entry→stop distance equals a
+        # fixed dollar risk budget, then clamp to the notional cap.
+        risk_dollars = float(
+            getattr(self._settings, "stock_risk_per_trade_dollars", 0) or 0
+        )
+        if risk_dollars > 0 and stop_price is not None and stop_price < price:
+            per_share_risk = price - stop_price
+            if per_share_risk > 0:
+                risk_shares = int(risk_dollars / per_share_risk)
+                shares = min(risk_shares, notional_cap_shares)
+                return max(0, shares)
+
+        return max(1, notional_cap_shares) if notional_cap_shares >= 1 else 0

@@ -372,6 +372,65 @@ _VALID_SENTIMENTS = {s.value for s in SentimentDirection}
 _EVENT_MAP: dict[str, EventType] = {e.value: e for e in EventType}
 _SENT_MAP: dict[str, SentimentDirection] = {s.value: s for s in SentimentDirection}
 
+# Small local models (e.g. phi3) frequently emit event-type labels outside our
+# enum. Fold the common ones into the closest supported category so they map
+# correctly instead of spamming validation warnings and collapsing to 'other'.
+_EVENT_SYNONYMS: dict[str, EventType] = {
+    "politics": EventType.ELECTION,
+    "political": EventType.ELECTION,
+    "vote": EventType.ELECTION,
+    "voting": EventType.ELECTION,
+    "policy": EventType.ELECTION,
+    "government": EventType.GEOPOLITICAL,
+    "geopolitics": EventType.GEOPOLITICAL,
+    "international": EventType.GEOPOLITICAL,
+    "war": EventType.GEOPOLITICAL,
+    "military": EventType.GEOPOLITICAL,
+    "conflict": EventType.GEOPOLITICAL,
+    "security": EventType.GEOPOLITICAL,
+    "diplomacy": EventType.GEOPOLITICAL,
+    "terrorism": EventType.GEOPOLITICAL,
+    "economy": EventType.ECONOMIC,
+    "employment": EventType.ECONOMIC,
+    "jobs": EventType.ECONOMIC,
+    "labor": EventType.ECONOMIC,
+    "inflation": EventType.ECONOMIC,
+    "investment": EventType.ECONOMIC,
+    "business": EventType.ECONOMIC,
+    "finance": EventType.ECONOMIC,
+    "financial": EventType.ECONOMIC,
+    "market": EventType.ECONOMIC,
+    "markets": EventType.ECONOMIC,
+    "stocks": EventType.ECONOMIC,
+    "earnings": EventType.ECONOMIC,
+    "trade": EventType.ECONOMIC,
+    "tariff": EventType.ECONOMIC,
+    "real_estate": EventType.ECONOMIC,
+    "housing": EventType.ECONOMIC,
+    "energy": EventType.ECONOMIC,
+    "legal": EventType.LEGAL_RULING,
+    "law": EventType.LEGAL_RULING,
+    "lawsuit": EventType.LEGAL_RULING,
+    "court": EventType.LEGAL_RULING,
+    "ruling": EventType.LEGAL_RULING,
+    "verdict": EventType.LEGAL_RULING,
+    "indictment": EventType.LEGAL_RULING,
+    "crime": EventType.LEGAL_RULING,
+    "criminal": EventType.LEGAL_RULING,
+    "regulation": EventType.REGULATORY,
+    "regulatory": EventType.REGULATORY,
+    "sec": EventType.REGULATORY,
+    "fda": EventType.REGULATORY,
+    "antitrust": EventType.REGULATORY,
+    "cryptocurrency": EventType.CRYPTO,
+    "bitcoin": EventType.CRYPTO,
+    "blockchain": EventType.CRYPTO,
+    "sport": EventType.SPORTS,
+    "entertainment": EventType.CELEBRITY,
+    "celebrity": EventType.CELEBRITY,
+    "media": EventType.CELEBRITY,
+}
+
 _REQUIRED_FIELDS = {
     "event_type": str,
     "sentiment": str,
@@ -483,14 +542,14 @@ class LlmOutputValidator:
                 ))
 
         # ── Enum validation ────────────────────────────────────────
-        raw_event = str(data.get("event_type", "")).lower().strip()
-        if raw_event and raw_event not in _VALID_EVENT_TYPES:
-            errors.append(LlmValidationError(
-                "event_type",
-                f"unknown value {raw_event!r}; using 'other'",
-                value=raw_event,
-            ))
-        event_type = _EVENT_MAP.get(raw_event, EventType.OTHER)
+        # event_type is a soft category: map exact values and common synonyms;
+        # anything else falls back to 'other' silently (non-fatal, avoids noise).
+        raw_event = str(data.get("event_type", "")).lower().strip().replace(" ", "_")
+        event_type = (
+            _EVENT_MAP.get(raw_event)
+            or _EVENT_SYNONYMS.get(raw_event)
+            or EventType.OTHER
+        )
 
         raw_sent = str(data.get("sentiment", "")).lower().strip()
         if raw_sent and raw_sent not in _VALID_SENTIMENTS:

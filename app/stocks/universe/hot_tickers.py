@@ -20,6 +20,7 @@ trading loop owns the instance.
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -87,6 +88,10 @@ class HotTickerTracker:
         self._min_relevance = min_relevance
         self._entries: deque[HotTickerEntry] = deque(maxlen=2000)
         self._state: dict[str, HotTicker] = {}
+        # ingest() runs on the NLP worker thread (asyncio.to_thread) while the
+        # trading / universe-refresh loops read on the event loop. Guard all
+        # access to _entries/_state. Reentrant so internal _prune calls are ok.
+        self._lock = threading.RLock()
 
     def ingest(
         self,
@@ -109,23 +114,24 @@ class HotTickerTracker:
             return set()
 
         touched: set[str] = set()
-        for ticker in candidates:
-            if ticker not in self._resolver.allowed_tickers:
-                continue
-            entry = HotTickerEntry(
-                ticker=ticker,
-                headline=headline[:200],
-                sentiment=classification.sentiment,
-                sentiment_score=classification.sentiment_score,
-                urgency=classification.urgency,
-                relevance=classification.relevance,
-                confidence=classification.confidence,
-                timestamp=now,
-            )
-            self._entries.append(entry)
-            self._update_state(entry, now)
-            touched.add(ticker)
-        self._prune(now)
+        with self._lock:
+            for ticker in candidates:
+                if ticker not in self._resolver.allowed_tickers:
+                    continue
+                entry = HotTickerEntry(
+                    ticker=ticker,
+                    headline=headline[:200],
+                    sentiment=classification.sentiment,
+                    sentiment_score=classification.sentiment_score,
+                    urgency=classification.urgency,
+                    relevance=classification.relevance,
+                    confidence=classification.confidence,
+                    timestamp=now,
+                )
+                self._entries.append(entry)
+                self._update_state(entry, now)
+                touched.add(ticker)
+            self._prune(now)
         return touched
 
     def _update_state(self, entry: HotTickerEntry, now: datetime) -> None:
@@ -180,31 +186,36 @@ class HotTickerTracker:
         self, limit: int | None = None, *, now: datetime | None = None
     ) -> list[str]:
         """Return ticker symbols ordered by current score (high → low)."""
-        self._prune(now)
-        ranked = sorted(
-            self._state.values(),
-            key=lambda s: s.score,
-            reverse=True,
-        )
-        cap = limit if limit is not None else self._max_tickers
-        return [s.ticker for s in ranked[:cap]]
+        with self._lock:
+            self._prune(now)
+            ranked = sorted(
+                self._state.values(),
+                key=lambda s: s.score,
+                reverse=True,
+            )
+            cap = limit if limit is not None else self._max_tickers
+            return [s.ticker for s in ranked[:cap]]
 
     def get_state(self, ticker: str) -> HotTicker | None:
-        return self._state.get(ticker.upper())
+        with self._lock:
+            return self._state.get(ticker.upper())
 
     def latest_headline(self, ticker: str) -> str:
         """Return the most recent headline that touched this ticker."""
-        state = self._state.get(ticker.upper())
-        return state.latest_headline if state else ""
+        with self._lock:
+            state = self._state.get(ticker.upper())
+            return state.latest_headline if state else ""
 
     def snapshot(self) -> list[HotTicker]:
         """Return all currently-tracked tickers (unsorted, post-prune)."""
-        self._prune()
-        return list(self._state.values())
+        with self._lock:
+            self._prune()
+            return list(self._state.values())
 
     def clear(self) -> None:
-        self._entries.clear()
-        self._state.clear()
+        with self._lock:
+            self._entries.clear()
+            self._state.clear()
 
     def ingest_many(
         self, items: Iterable[tuple[ClassificationResult, str]]

@@ -35,5 +35,14 @@ class StockFilter:
                 sector = asset.get("sector", "").lower()
                 if sector and sector not in self._sectors:
                     continue
+            # Apply price/volume gates when the asset has been enriched with
+            # market data (snapshot). Plain catalog entries lack these fields,
+            # in which case they pass through unchanged.
+            price = asset.get("price")
+            if price is not None and not (self._min_price <= float(price) <= self._max_price):
+                continue
+            volume = asset.get("volume")
+            if volume is not None and float(volume) < self._min_volume:
+                continue
             passed.append(asset)
         return passed

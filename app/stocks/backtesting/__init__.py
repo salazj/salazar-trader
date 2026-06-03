@@ -7,6 +7,7 @@ from app.stocks.backtesting.engine import (
     StockTrade,
     load_csv_bars,
 )
+from app.stocks.backtesting.pipeline import StockPipelineBacktestEngine
 from app.stocks.backtesting.walk_forward import (
     WalkForwardSplit,
     walk_forward_splits,
@@ -17,6 +18,7 @@ from app.stocks.backtesting.walk_forward import (
 __all__ = [
     "StockBacktestConfig",
     "StockBacktestEngine",
+    "StockPipelineBacktestEngine",
     "StockBacktestResult",
     "StockTrade",
     "load_csv_bars",

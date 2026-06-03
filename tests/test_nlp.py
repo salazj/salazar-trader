@@ -665,13 +665,16 @@ class TestNewsIngestionService:
         assert len(d2) == 0
 
     @pytest.mark.asyncio
-    async def test_drains_signals(self) -> None:
+    async def test_buffers_signals_without_draining(self) -> None:
+        # Signals are intentionally NOT drained on read: they are buffered so
+        # every market gets a chance to match across multiple intelligence-loop
+        # iterations, and are pruned by age inside ``_poll_cycle`` instead.
         svc = NewsIngestionService(providers=[MockProvider()], pipeline=NlpPipeline())
         svc.set_market_provider(lambda: [_market("Will crypto regulation pass?")])
         await svc.poll_once()
         first = svc.get_latest_signals()
         second = svc.get_latest_signals()
-        assert len(second) == 0
+        assert len(second) == len(first)
 
     @pytest.mark.asyncio
     async def test_unavailable_provider(self) -> None:
@@ -971,7 +974,31 @@ class TestLlmOutputValidator:
         })
         result, errors = LlmOutputValidator.validate(raw)
         assert result.event_type == EventType.OTHER
-        assert any(e.field == "event_type" for e in errors)
+        # event_type is a soft category: unknown labels fall back to 'other'
+        # silently (no validation error) to avoid log noise from small models.
+        assert not any(e.field == "event_type" for e in errors)
+
+    def test_event_type_synonyms_map_to_known_categories(self) -> None:
+        cases = {
+            "political": EventType.ELECTION,
+            "employment": EventType.ECONOMIC,
+            "lawsuit": EventType.LEGAL_RULING,
+            "bitcoin": EventType.CRYPTO,
+        }
+        for raw_event, expected in cases.items():
+            raw = json.dumps({
+                "event_type": raw_event,
+                "sentiment": "neutral",
+                "sentiment_score": 0,
+                "urgency": 0,
+                "relevance": 0,
+                "confidence": 0.5,
+                "rationale": "test",
+                "entities": [],
+            })
+            result, errors = LlmOutputValidator.validate(raw)
+            assert result.event_type == expected, raw_event
+            assert not any(e.field == "event_type" for e in errors), raw_event
 
     def test_unknown_sentiment_defaults_to_neutral(self) -> None:
         raw = json.dumps({
