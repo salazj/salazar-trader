@@ -314,6 +314,19 @@ class Settings(BaseSettings):
     def validate_exchange(cls, v: str) -> str:
         allowed = {"polymarket"}
         v = v.lower()
+        # Backward-compat: Kalshi support was removed. Quietly migrate stale
+        # deployment .env files (EXCHANGE=kalshi) to the only supported
+        # prediction-market exchange instead of crashing startup — the field
+        # is inactive in equities mode anyway.
+        if v == "kalshi":
+            import warnings
+
+            warnings.warn(
+                "EXCHANGE=kalshi is no longer supported; falling back to "
+                "'polymarket'. Update your .env to remove this warning.",
+                stacklevel=2,
+            )
+            return "polymarket"
         if v not in allowed:
             raise ValueError(f"exchange must be one of {allowed}")
         return v
