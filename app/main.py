@@ -772,7 +772,9 @@ class TradingBot:
 
         # Prime each engine with recent history so indicators (EMA/VWAP/ATR…)
         # are valid immediately instead of waiting ~50 minutes for live bars.
-        await self._warmup_stock_bars(symbols)
+        # Pull enough bars to also fill the regime lookback in one shot.
+        warmup_bars = max(60, int(self._settings.regime_lookback_bars) + 10)
+        await self._warmup_stock_bars(symbols, limit=warmup_bars, seed_regime=True)
 
         # Know what we already hold before placing any orders (dedup guard).
         await self._sync_broker_positions()
@@ -830,10 +832,20 @@ class TradingBot:
             vwap=b.get("vwap"),
         )
 
-    async def _warmup_stock_bars(self, symbols: list[str], limit: int = 60) -> None:
-        """Backfill each engine with recent 1-minute bars via REST."""
+    async def _warmup_stock_bars(
+        self, symbols: list[str], limit: int = 60, *, seed_regime: bool = False
+    ) -> None:
+        """Backfill each engine with recent 1-minute bars via REST.
+
+        When ``seed_regime`` is set, SPY/QQQ closes are also pushed into the
+        regime detector so it has a full lookback window immediately on
+        startup. Without this the regime is starved (~1 close/min off the thin
+        IEX feed) and reports a flat low-volatility regime for ~an hour after
+        every restart, suppressing the trend strategies.
+        """
         warmed = 0
         total_bars = 0
+        seeded_regime = 0
         for sym in symbols:
             engine = self._stock_feature_engines.get(sym)
             if engine is None:
@@ -849,9 +861,20 @@ class TradingBot:
                     total_bars += 1
                 except Exception:
                     continue
+            if seed_regime and sym.upper() in ("SPY", "QQQ"):
+                for b in bars:
+                    close = float(b.get("close", 0) or 0)
+                    if close > 0:
+                        self._stock_regime.update_close(sym, close)
+                        seeded_regime += 1
             if bars:
                 warmed += 1
-        logger.info("stock_bars_warmed", symbols=warmed, total_bars=total_bars)
+        logger.info(
+            "stock_bars_warmed",
+            symbols=warmed,
+            total_bars=total_bars,
+            regime_closes=seeded_regime,
+        )
 
     # Strategy families for regime-based biasing.
     _TREND_STRATEGIES = {"stock_momentum", "stock_breakout", "stock_pullback"}
@@ -1089,7 +1112,8 @@ class TradingBot:
             scan_evaluated = 0
             scan_priced = 0
             scan_l1_signals = 0
-            scan_actions = 0
+            scan_buys = 0
+            scan_sells = 0
             scan_orders = 0
             scan_blocks: dict[str, int] = {}
 
@@ -1173,8 +1197,10 @@ class TradingBot:
                         broker=self._broker,
                     )
                     self._stock_decision_store.add(trace)
-                    if trace.action.value in {"buy", "sell"}:
-                        scan_actions += 1
+                    if trace.action.value == "buy":
+                        scan_buys += 1
+                    elif trace.action.value == "sell":
+                        scan_sells += 1
                     elif trace.blocked_reason:
                         key = _block_category(trace.blocked_reason)
                         scan_blocks[key] = scan_blocks.get(key, 0) + 1
@@ -1219,16 +1245,22 @@ class TradingBot:
                 top_blocks = dict(
                     sorted(scan_blocks.items(), key=lambda kv: kv[1], reverse=True)[:4]
                 )
+                regime_name = (
+                    regime.regime.value
+                    if regime is not None and hasattr(regime, "regime")
+                    else None
+                )
                 logger.info(
                     "stock_scan_summary",
                     symbols=len(self._stock_feature_engines),
                     evaluated=scan_evaluated,
                     priced=scan_priced,
                     l1_signals=scan_l1_signals,
-                    actions=scan_actions,
+                    buys=scan_buys,
+                    sells_skipped=scan_sells,  # long-only: sells on flat names don't execute
                     orders=scan_orders,
                     held=len(self._stock_held_symbols),
-                    regime=getattr(regime, "value", str(regime)) if regime else None,
+                    regime=regime_name,
                     blocks=top_blocks,
                 )
 

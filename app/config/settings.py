@@ -250,7 +250,10 @@ class Settings(BaseSettings):
     # consecutive losing exits within a session.
     stock_max_consecutive_losses_per_symbol: int = Field(default=2, ge=1)
     # Maximum bar age (seconds) tolerated by risk manager — blocks stale data.
-    stock_max_bar_age_seconds: int = Field(default=120, ge=10)
+    # IEX (free Alpaca feed) prints sparse bars for less-liquid names; 120s was
+    # too tight and produced spurious "stale data" blocks. 300s tolerates normal
+    # IEX gaps while still rejecting genuinely stale data (e.g. a dead stream).
+    stock_max_bar_age_seconds: int = Field(default=300, ge=10)
 
     # --- Three-layer decision weights for stock trading ---
     stock_l1_weight: float = Field(default=0.50, ge=0.0, le=1.0)
