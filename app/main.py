@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
+
+if TYPE_CHECKING:
+    from app.stocks.models import StockBar
 
 from app.config.settings import Settings, get_settings
 from app.data.features import FeatureEngine
 from app.data.models import Market, MarketFeatures, Order, Side, Signal, SignalAction, Trade, TradingMode
-from app.utils.helpers import generate_order_id
+from app.utils.helpers import generate_order_id, utc_now
 from app.data.orderbook import OrderbookManager
 from app.decision.engine import DecisionEngine, signal_to_normalized
 from app.decision.ensemble import DecisionMode, EnsembleConfig
@@ -679,6 +682,14 @@ class TradingBot:
 
         logger.info("stocks_loaded", count=len(symbols), symbols=symbols[:10])
 
+        # Prime each engine with recent history so indicators (EMA/VWAP/ATR…)
+        # are valid immediately instead of waiting ~50 minutes for live bars.
+        await self._warmup_stock_bars(symbols)
+
+        # Wire the live minute-bar stream into the feature engines.
+        self._broker.streaming.on("bar", self._on_stock_bar)
+        await self._broker.streaming.subscribe_bars(symbols)
+
         await self._health_server.start()
         self._running = True
         self._portfolio.start_new_day()
@@ -700,6 +711,66 @@ class TradingBot:
         await self._broker.close()
         await self._repository.close()
         logger.info("bot_stopped_equities")
+
+    @staticmethod
+    def _bar_from_dict(symbol: str, b: dict) -> "StockBar":
+        """Build a StockBar from a market-data / stream dict (tolerant of str timestamps)."""
+        from datetime import datetime
+
+        from app.stocks.models import StockBar
+
+        ts = b.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except Exception:
+                ts = utc_now()
+        elif ts is None:
+            ts = utc_now()
+        return StockBar(
+            symbol=symbol,
+            open=float(b.get("open", 0) or 0),
+            high=float(b.get("high", 0) or 0),
+            low=float(b.get("low", 0) or 0),
+            close=float(b.get("close", 0) or 0),
+            volume=int(b.get("volume", 0) or 0),
+            timestamp=ts,
+            vwap=b.get("vwap"),
+        )
+
+    async def _warmup_stock_bars(self, symbols: list[str], limit: int = 60) -> None:
+        """Backfill each engine with recent 1-minute bars via REST."""
+        warmed = 0
+        total_bars = 0
+        for sym in symbols:
+            engine = self._stock_feature_engines.get(sym)
+            if engine is None:
+                continue
+            try:
+                bars = await self._broker.market_data.get_bars(sym, "1Min", limit=limit)
+            except Exception as exc:
+                logger.warning("stock_warmup_failed", symbol=sym, error=str(exc))
+                continue
+            for b in bars:
+                try:
+                    engine.add_bar(self._bar_from_dict(sym, b))
+                    total_bars += 1
+                except Exception:
+                    continue
+            if bars:
+                warmed += 1
+        logger.info("stock_bars_warmed", symbols=warmed, total_bars=total_bars)
+
+    async def _on_stock_bar(self, data: dict) -> None:
+        """Ingest a live minute bar from the Alpaca stream into the feature engine."""
+        symbol = data.get("symbol", "")
+        engine = self._stock_feature_engines.get(symbol)
+        if engine is None:
+            return
+        try:
+            engine.add_bar(self._bar_from_dict(symbol, data))
+        except Exception:
+            logger.exception("stock_bar_ingest_failed", symbol=symbol)
 
     def _build_tech_context(self, features) -> str:
         """Compact indicator summary used in the LLM prompt."""
@@ -897,6 +968,21 @@ class TradingBot:
             for sym in sorted(to_drop):
                 self._stock_feature_engines.pop(sym, None)
                 self._stock_news_context.pop(sym, None)
+
+            # Backfill history and (un)subscribe the live bar stream for the diff.
+            if to_add:
+                await self._warmup_stock_bars(sorted(to_add))
+                try:
+                    await self._broker.streaming.subscribe_bars(sorted(to_add))
+                except Exception:
+                    logger.exception("stock_bar_subscribe_failed", symbols=sorted(to_add))
+            if to_drop:
+                try:
+                    unsub = getattr(self._broker.streaming, "unsubscribe_bars", None)
+                    if unsub is not None:
+                        await unsub(sorted(to_drop))
+                except Exception:
+                    logger.exception("stock_bar_unsubscribe_failed", symbols=sorted(to_drop))
 
             if to_add or to_drop:
                 logger.info(
