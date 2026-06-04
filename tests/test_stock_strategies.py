@@ -73,6 +73,36 @@ class TestMomentumStrategy:
         assert sig is not None
         assert sig.action.value == "SELL"
 
+    def test_short_signal_carries_inverted_bracket(self):
+        # A short thesis must attach a protective stop ABOVE entry and a
+        # take-profit BELOW it, so the broker-side short bracket is valid.
+        strat = StockMomentum()
+        features = _make_features(
+            last_price=147.0,
+            ema_9=149.0,
+            momentum_5m=-0.01,
+            atr_14=2.0,
+            rsi_14=50.0,
+            relative_volume=1.5,
+            volume_surge_ratio=1.5,
+        )
+        sig = strat.generate_signal(features, _make_portfolio())
+        assert sig is not None and sig.action.value == "SELL"
+        assert sig.stop_price is not None and sig.stop_price > features.last_price
+        assert sig.target_price is not None and sig.target_price < features.last_price
+
+    def test_no_short_into_higher_timeframe_uptrend(self):
+        # htf_trend > 0 should veto a short even on a 1m down-thrust.
+        strat = StockMomentum()
+        features = _make_features(
+            last_price=147.0,
+            ema_9=149.0,
+            momentum_5m=-0.01,
+            htf_trend=0.5,
+        )
+        sig = strat.generate_signal(features, _make_portfolio())
+        assert sig is None
+
 
 class TestMeanReversionStrategy:
     def test_buy_below_vwap_low_rsi(self):

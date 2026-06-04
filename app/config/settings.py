@@ -234,6 +234,12 @@ class Settings(BaseSettings):
     # intelligence loop from firing duplicate orders on a persistent signal.
     stock_order_cooldown_seconds: float = Field(default=300.0, ge=0)
     stock_require_stop_loss: bool = True
+    # Allow short selling: act on bearish signals by selling-to-open a short
+    # (protected by a broker-side stop above and target below). When False the
+    # bot is long-only and bearish signals on flat names are ignored. Shorting
+    # requires a margin-enabled Alpaca account and doubles opportunity at the
+    # cost of theoretically unbounded upside risk — kept off by default.
+    stock_allow_shorts: bool = False
     # --- Position management (live exits beyond the broker bracket) ---
     # Flatten all positions this many minutes before the regular close (0=off).
     stock_eod_flatten_minutes: float = Field(default=10.0, ge=0)

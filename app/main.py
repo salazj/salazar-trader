@@ -393,6 +393,9 @@ class TradingBot:
         self._stock_order_cooldown = float(
             getattr(self._settings, "stock_order_cooldown_seconds", 300.0)
         )
+        # When True, bearish signals on flat names open shorts (sell-to-open)
+        # instead of being ignored. Requires a margin-enabled Alpaca account.
+        self._allow_shorts = bool(getattr(self._settings, "stock_allow_shorts", False))
         # Position ledger keyed by symbol: tracks entry strategy/price/time,
         # peak price (for trailing), and last unrealized PnL so we can attribute
         # realized PnL to the originating strategy when a position closes.
@@ -432,6 +435,12 @@ class TradingBot:
             lookback=self._settings.regime_lookback_bars,
         )
         self._stock_ml = StockMLPredictor.load(self._settings.stock_ml_model_path)
+        logger.info(
+            "stock_ml_loaded",
+            path=self._settings.stock_ml_model_path,
+            version=self._stock_ml.version,
+            active=self._stock_ml.is_ready,
+        )
         self._stock_llm_service = LocalLLMService(self._settings)
 
         # Per-symbol news context cache for the LLM (latest headline string).
@@ -931,8 +940,17 @@ class TradingBot:
                 return "max_open_positions"
             return ""
         if action == "sell":
-            # Only exit positions we actually hold — never open shorts here.
-            return "" if already_held else "not_held"
+            # Holding a long → this sell closes it (always allowed).
+            if already_held:
+                return ""
+            # Flat: a sell opens a short. Only when shorting is enabled, and
+            # subject to the same distinct-holdings cap as longs.
+            if not self._allow_shorts:
+                return "not_held"
+            max_open = int(getattr(self._settings, "stock_max_open_positions", 0) or 0)
+            if max_open > 0 and len(self._stock_held_symbols) >= max_open:
+                return "max_open_positions"
+            return ""
         return "unknown_action"
 
     def _should_place_order(self, symbol: str, action: str) -> bool:
@@ -974,6 +992,7 @@ class TradingBot:
                     "qty": qty,
                     "opened_at": time.time(),
                     "peak_price": cur_price or avg_entry,
+                    "trough_price": cur_price or avg_entry,
                 }
                 self._stock_positions[sym] = entry
             entry["qty"] = qty
@@ -981,6 +1000,8 @@ class TradingBot:
                 entry["entry_price"] = avg_entry
             if cur_price > 0:
                 entry["peak_price"] = max(entry.get("peak_price", 0.0), cur_price)
+                prev_trough = entry.get("trough_price", 0.0) or cur_price
+                entry["trough_price"] = min(prev_trough, cur_price)
                 entry["last_price"] = cur_price
             entry["unrealized_pl"] = unrealized
 
@@ -1009,7 +1030,11 @@ class TradingBot:
         self._stock_held_symbols = held
 
     def _record_entry(self, symbol: str, strategy: str, price: float, qty: int) -> None:
-        """Seed the position ledger when we submit an entry (refined on sync)."""
+        """Seed the position ledger when we submit an entry (refined on sync).
+
+        ``qty`` is signed: positive for a long, negative for a short, so the
+        trailing-stop logic and PnL attribution know the direction.
+        """
         sym = symbol.upper()
         self._stock_positions[sym] = {
             "strategy": strategy,
@@ -1017,6 +1042,7 @@ class TradingBot:
             "qty": int(qty),
             "opened_at": time.time(),
             "peak_price": float(price),
+            "trough_price": float(price),
             "last_price": float(price),
             "unrealized_pl": 0.0,
         }
@@ -1119,6 +1145,7 @@ class TradingBot:
             scan_l1_signals = 0
             scan_buys = 0
             scan_sells = 0
+            scan_shorts = 0
             scan_orders = 0
             scan_blocks: dict[str, int] = {}
 
@@ -1220,6 +1247,14 @@ class TradingBot:
                             pass
 
                     if trace.action.value in {"buy", "sell"}:
+                        sym_u = symbol.upper()
+                        held_now = sym_u in self._stock_held_symbols
+                        # Classify intent: a buy on a flat name or a short-sell on
+                        # a flat name opens exposure (entry); a sell on a held long
+                        # closes it (exit).
+                        is_entry = trace.action.value == "buy" or (
+                            trace.action.value == "sell" and not held_now
+                        )
                         skip = self._order_skip_reason(symbol, trace.action.value)
                         if skip and skip != "not_held":
                             # not_held is the normal long-only case (already
@@ -1233,16 +1268,26 @@ class TradingBot:
                                 features,
                                 portfolio_snap,
                                 broker=self._broker,
+                                is_entry=is_entry,
                             )
                             if record is not None and record.status != "rejected":
                                 scan_orders += 1
-                                self._stock_last_order_ts[symbol.upper()] = time.time()
-                                if trace.action.value == "buy":
-                                    self._stock_held_symbols.add(symbol.upper())
+                                self._stock_last_order_ts[sym_u] = time.time()
+                                if is_entry:
+                                    # Long buy → +qty; short sell → -qty so the
+                                    # ledger/trailing logic knows the direction.
+                                    signed_qty = (
+                                        record.quantity
+                                        if trace.action.value == "buy"
+                                        else -record.quantity
+                                    )
+                                    self._stock_held_symbols.add(sym_u)
                                     self._record_entry(
                                         symbol, trace.strategy,
-                                        record.price, record.quantity,
+                                        record.price, signed_qty,
                                     )
+                                    if trace.action.value == "sell":
+                                        scan_shorts += 1
                             else:
                                 rej = (
                                     record.status
@@ -1276,7 +1321,8 @@ class TradingBot:
                     priced=scan_priced,
                     l1_signals=scan_l1_signals,
                     buys=scan_buys,
-                    sells_skipped=scan_sells,  # long-only: sells on flat names don't execute
+                    sells=scan_sells,
+                    shorts=scan_shorts,  # bearish entries (0 when shorting disabled)
                     orders=scan_orders,
                     held=len(self._stock_held_symbols),
                     regime=regime_name,
@@ -1358,14 +1404,26 @@ class TradingBot:
                         if age_min >= max_hold_min:
                             await self._close_stock_position(sym, "time_stop")
                             continue
-                    # 3) Trailing stop (only once in profit).
+                    # 3) Trailing stop (only once in profit). Direction-aware:
+                    # longs trail the peak (exit on a fall), shorts trail the
+                    # trough (exit on a rise).
                     if trail_pct > 0:
-                        peak = float(entry.get("peak_price", 0) or 0)
                         last = float(entry.get("last_price", 0) or 0)
                         ep = float(entry.get("entry_price", 0) or 0)
-                        if peak > ep > 0 and last > 0 and last <= peak * (1 - trail_pct):
-                            await self._close_stock_position(sym, "trailing_stop")
-                            continue
+                        is_short = float(entry.get("qty", 0) or 0) < 0
+                        if is_short:
+                            trough = float(entry.get("trough_price", 0) or 0)
+                            if (
+                                0 < trough < ep and last > 0
+                                and last >= trough * (1 + trail_pct)
+                            ):
+                                await self._close_stock_position(sym, "trailing_stop")
+                                continue
+                        else:
+                            peak = float(entry.get("peak_price", 0) or 0)
+                            if peak > ep > 0 and last > 0 and last <= peak * (1 - trail_pct):
+                                await self._close_stock_position(sym, "trailing_stop")
+                                continue
             except Exception as exc:
                 logger.error("stock_position_mgmt_error", error=str(exc))
 

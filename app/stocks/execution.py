@@ -76,14 +76,20 @@ class StockExecutionEngine:
         portfolio: PortfolioSnapshot,
         *,
         broker=None,
+        is_entry: bool | None = None,
     ) -> StockOrderRecord | None:
         if signal.action == StockAction.HOLD:
             return None
 
         side = "buy" if signal.action in (StockAction.BUY, StockAction.COVER) else "sell"
+        # An entry opens exposure: a long BUY, or a short SELL (sell with no
+        # existing long to close). The caller passes is_entry explicitly; when
+        # omitted we assume a BUY is an entry (long-only legacy behavior).
+        if is_entry is None:
+            is_entry = side == "buy"
         price = signal.suggested_price or features.last_price
         quantity = signal.suggested_quantity or self._compute_quantity(
-            price, portfolio, stop_price=signal.stop_price
+            price, portfolio, stop_price=signal.stop_price, side=side
         )
 
         if quantity <= 0:
@@ -98,6 +104,7 @@ class StockExecutionEngine:
             broker=broker,
             stop_price=signal.stop_price,
             bar_timestamp=features.timestamp,
+            is_entry=is_entry,
         )
         if not check.approved:
             logger.info(
@@ -129,10 +136,11 @@ class StockExecutionEngine:
         else:
             try:
                 limit_price = price if signal.order_type != OrderType.MARKET else None
-                # Entries (BUY) go in as broker-side bracket/OTO orders so the
-                # protective stop and take-profit live at Alpaca even if the bot
-                # restarts. Exits (SELL-to-close) are plain orders.
-                if side == "buy" and (
+                # Entries (long BUY or short SELL) go in as broker-side
+                # bracket/OTO orders so the protective stop and take-profit live
+                # at Alpaca even if the bot restarts. Exits (closing orders) are
+                # plain orders so they flatten immediately.
+                if is_entry and (
                     signal.stop_price is not None or signal.target_price is not None
                 ):
                     result = await self._execution.place_bracket_order(
@@ -199,6 +207,7 @@ class StockExecutionEngine:
         portfolio: PortfolioSnapshot,
         *,
         stop_price: float | None = None,
+        side: str = "buy",
     ) -> int:
         if price <= 0:
             return 0
@@ -210,12 +219,14 @@ class StockExecutionEngine:
         notional_cap_shares = int(max_dollars / price)
 
         # Volatility/risk-based sizing: size so the entry→stop distance equals a
-        # fixed dollar risk budget, then clamp to the notional cap.
+        # fixed dollar risk budget, then clamp to the notional cap. The stop sits
+        # below the entry for longs and above it for shorts, so use the absolute
+        # distance to keep the dollar risk symmetric across both directions.
         risk_dollars = float(
             getattr(self._settings, "stock_risk_per_trade_dollars", 0) or 0
         )
-        if risk_dollars > 0 and stop_price is not None and stop_price < price:
-            per_share_risk = price - stop_price
+        if risk_dollars > 0 and stop_price is not None:
+            per_share_risk = abs(price - stop_price)
             if per_share_risk > 0:
                 risk_shares = int(risk_dollars / per_share_risk)
                 shares = min(risk_shares, notional_cap_shares)

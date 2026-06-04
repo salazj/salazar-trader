@@ -199,6 +199,33 @@ class TestStockDecisionEngine:
         assert trace.action == StockDecisionAction.BLOCKED
         assert "regime" in (trace.blocked_reason or "")
 
+    def test_short_signal_allowed_in_bearish_regime(self) -> None:
+        # A confident SELL with the signed gate satisfied should surface as a
+        # SELL action when the regime permits shorting.
+        s = _settings(stock_min_final_score=0.30)
+        eng = StockDecisionEngine(s, risk_manager=StockRiskManager(s))
+        trace = eng.evaluate(
+            "NVDA", _features(), _portfolio(),
+            l1_signal=_signal(action=StockAction.SELL, stop=105.0, confidence=0.8),
+            llm_verdict=safe_default_verdict("NVDA"),
+            regime=_bearish_regime(),
+        )
+        assert trace.action == StockDecisionAction.SELL
+        assert trace.blocked_reason is None
+
+    def test_short_blocked_in_bullish_regime(self) -> None:
+        # Don't fight a clean uptrend: shorts are vetoed in a bullish regime.
+        s = _settings(stock_min_final_score=0.30)
+        eng = StockDecisionEngine(s, risk_manager=StockRiskManager(s))
+        trace = eng.evaluate(
+            "NVDA", _features(), _portfolio(),
+            l1_signal=_signal(action=StockAction.SELL, stop=105.0, confidence=0.8),
+            llm_verdict=safe_default_verdict("NVDA"),
+            regime=_bullish_regime(),
+        )
+        assert trace.action == StockDecisionAction.BLOCKED
+        assert "disallows short" in (trace.blocked_reason or "")
+
     def test_low_final_score_blocks(self) -> None:
         # Set the threshold high so the trade fails the gate.
         s = _settings(stock_min_final_score=0.95)

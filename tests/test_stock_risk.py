@@ -87,3 +87,54 @@ class TestStockRiskManager:
         )
         assert result.approved is False
         assert rm.is_halted is True
+
+
+class TestShortSellingGates:
+    """Short entries (sell-to-open) must obey the same entry-only gates as
+    longs, while a plain sell-to-close stays exempt (legacy long-only path)."""
+
+    def test_short_entry_requires_stop_loss(self):
+        rm = StockRiskManager(_make_settings(stock_require_stop_loss=True))
+        # Sell flagged as an entry with no stop → rejected (mirror of a long).
+        res = rm.check_order(
+            "AAPL", "sell", 150.0, 1, _make_portfolio(),
+            stop_price=None, is_entry=True,
+        )
+        assert res.approved is False
+        assert "stop loss" in res.reason.lower()
+
+    def test_short_close_does_not_require_stop(self):
+        rm = StockRiskManager(_make_settings(stock_require_stop_loss=True))
+        # Sell to *close* a long (is_entry defaults to False for SELL).
+        res = rm.check_order("AAPL", "sell", 150.0, 1, _make_portfolio())
+        assert res.approved is True
+
+    def test_short_entry_counts_against_max_positions(self):
+        from app.data.models import Position
+        rm = StockRiskManager(_make_settings(stock_max_open_positions=2))
+        positions = [
+            Position(token_id="a", exchange="alpaca"),
+            Position(token_id="b", exchange="alpaca"),
+        ]
+        portfolio = PortfolioSnapshot(cash=10000.0, positions=positions)
+        res = rm.check_order(
+            "AAPL", "sell", 150.0, 1, portfolio,
+            stop_price=155.0, is_entry=True,
+        )
+        assert res.approved is False
+        assert "positions" in res.reason.lower()
+
+    def test_short_entry_consumes_daily_trade_budget(self):
+        rm = StockRiskManager(_make_settings(stock_max_trades_per_day=1))
+        ok = rm.check_order(
+            "AAPL", "sell", 150.0, 1, _make_portfolio(),
+            stop_price=155.0, is_entry=True, commit=True,
+        )
+        assert ok.approved is True
+        assert rm.trades_today == 1
+        blocked = rm.check_order(
+            "MSFT", "sell", 150.0, 1, _make_portfolio(),
+            stop_price=155.0, is_entry=True, commit=True,
+        )
+        assert blocked.approved is False
+        assert "trades per day" in blocked.reason.lower()

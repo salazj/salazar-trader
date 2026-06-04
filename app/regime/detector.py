@@ -53,6 +53,11 @@ class RegimeReading:
         }
 
     @property
+    def allows_short(self) -> bool:
+        # Mirror of ``allows_long``: don't fight a clean uptrend with shorts.
+        return self.regime != MarketRegime.TRENDING_BULLISH
+
+    @property
     def prefers_momentum(self) -> bool:
         return self.regime == MarketRegime.TRENDING_BULLISH
 
@@ -73,6 +78,7 @@ class RegimeReading:
             "volume_ratio": self.volume_ratio,
             "rationale": self.rationale,
             "allows_long": self.allows_long,
+            "allows_short": self.allows_short,
         }
 
 

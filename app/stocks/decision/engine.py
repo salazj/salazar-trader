@@ -224,6 +224,14 @@ class StockDecisionEngine:
             block_reason = (
                 f"regime {regime.regime.value} disallows long entries"
             )
+        elif (
+            regime is not None
+            and direction < 0
+            and not regime.allows_short
+        ):
+            block_reason = (
+                f"regime {regime.regime.value} disallows short entries"
+            )
         elif direction != 0 and final * direction < self._min_score:
             # Signed gate: the fused score must AGREE with the L1 direction by
             # at least the threshold. This lets a bearish ML/LLM read veto a

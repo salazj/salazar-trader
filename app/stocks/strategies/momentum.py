@@ -102,20 +102,46 @@ class StockMomentum(BaseStockStrategy):
                 ),
             )
 
-        momentum_reversed = features.momentum_5m < -self.MOMENTUM_THRESHOLD
+        # Bearish / short thesis — the mirror image of the long: short-term EMA
+        # below medium-term, price under EMA-9 and VWAP, a downward 5m thrust on
+        # real volume, RSI not already oversold (avoid shorting into a bounce),
+        # and the higher timeframe not pointing up. A short bracket is attached
+        # (stop ABOVE, target BELOW) so the protective legs live at the broker.
+        ema_downtrend = features.ema_21 <= 0 or features.ema_9 < features.ema_21
         price_below_ema = features.last_price < features.ema_9
+        price_below_vwap = features.vwap <= 0 or features.last_price <= features.vwap
+        momentum_reversed = features.momentum_5m < -self.MOMENTUM_THRESHOLD
+        rsi_short_ok = features.rsi_14 > self.RSI_OVERSOLD
+        htf_short_ok = features.htf_trend <= 0.0
 
-        if price_below_ema and momentum_reversed:
-            confidence = min(0.8, 0.4 + abs(features.momentum_5m) * 10)
+        if (
+            ema_downtrend and price_below_ema and price_below_vwap
+            and momentum_reversed and rsi_short_ok and volume_ok and htf_short_ok
+        ):
+            confidence = min(0.9, 0.5 + abs(features.momentum_5m) * 10)
+            if features.mtf_alignment < 0:
+                confidence = min(0.95, confidence + 0.1 * abs(features.mtf_alignment))
             self._last_signal_bar[symbol] = count
+            last = features.last_price
+            atr = features.atr_14 if features.atr_14 > 0 else last * 0.01
+            stop = last + atr * self.ATR_STOP_MULTIPLIER
+            target = last - self.REWARD_RISK * (stop - last)
             return StockSignal(
                 strategy_name=self.name,
                 symbol=symbol,
                 action=StockAction.SELL,
                 confidence=confidence,
-                suggested_price=features.last_price,
+                suggested_price=last,
                 order_type=OrderType.LIMIT,
-                rationale=f"Momentum reversal, 5m momentum={features.momentum_5m:.4f}",
+                stop_price=round(stop, 2),
+                target_price=round(max(0.01, target), 2),
+                rationale=(
+                    f"EMA9<EMA21<VWAP, mom_5m={features.momentum_5m:.4f}, "
+                    f"RSI={features.rsi_14:.1f}, "
+                    f"vol_surge={features.volume_surge_ratio:.2f}, "
+                    f"htf_trend={features.htf_trend:+.2f}, "
+                    f"mtf_align={features.mtf_alignment:+.2f}"
+                ),
             )
 
         return None

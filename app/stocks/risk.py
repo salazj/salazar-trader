@@ -125,6 +125,7 @@ class StockRiskManager:
         stop_price: float | None = None,
         bar_timestamp: datetime | None = None,
         commit: bool = True,
+        is_entry: bool | None = None,
     ) -> StockRiskCheckResult:
         """Run all deterministic safety checks for a single order.
 
@@ -136,9 +137,17 @@ class StockRiskManager:
         the decision engine's gate) the daily-trade counter and order-frequency
         timestamps are NOT mutated, so only the real submit path (execution
         engine, ``commit=True``) consumes those budgets — avoids double counting.
+
+        ``is_entry`` marks an order that *opens* exposure (a long BUY or a short
+        SELL). Entry-only gates (stop-loss required, max open positions, daily
+        trade cap, revenge-trade guard) apply to entries regardless of side, so
+        short entries are governed identically to longs. When ``None`` it
+        defaults to ``side == BUY`` to preserve the long-only contract.
         """
         checks: list[str] = []
         symbol_upper = symbol.upper()
+        if is_entry is None:
+            is_entry = side.upper() == "BUY"
 
         with self._lock:
             self._roll_day_if_needed()
@@ -176,11 +185,7 @@ class StockRiskManager:
                     )
 
             checks.append("stop_loss_required")
-            if (
-                side.upper() == "BUY"
-                and self._require_stop_loss
-                and stop_price is None
-            ):
+            if is_entry and self._require_stop_loss and stop_price is None:
                 return self._deny(
                     "Stop loss required by REQUIRE_STOP_LOSS=true",
                     checks,
@@ -206,20 +211,14 @@ class StockRiskManager:
             position_count = (
                 len(portfolio.positions) if hasattr(portfolio, "positions") else 0
             )
-            if (
-                position_count >= self._max_open_positions
-                and side.upper() == "BUY"
-            ):
+            if position_count >= self._max_open_positions and is_entry:
                 return self._deny(
                     f"Max open positions ({self._max_open_positions}) reached",
                     checks,
                 )
 
             checks.append("max_trades_per_day")
-            if (
-                side.upper() == "BUY"
-                and self._trades_today >= self._max_trades_per_day
-            ):
+            if is_entry and self._trades_today >= self._max_trades_per_day:
                 return self._deny(
                     f"Max trades per day ({self._max_trades_per_day}) reached",
                     checks,
@@ -248,10 +247,7 @@ class StockRiskManager:
 
             checks.append("revenge_trade_guard")
             losses = self._consecutive_losses_by_symbol.get(symbol_upper, 0)
-            if (
-                side.upper() == "BUY"
-                and losses >= self._max_consec_losses_per_symbol
-            ):
+            if is_entry and losses >= self._max_consec_losses_per_symbol:
                 return self._deny(
                     f"Revenge-trade guard active for {symbol_upper}: "
                     f"{losses} consecutive losses",
@@ -263,7 +259,7 @@ class StockRiskManager:
             # counted twice and the daily/per-minute caps trip prematurely.
             if commit:
                 self._order_timestamps.append(now)
-                if side.upper() == "BUY":
+                if is_entry:
                     self._trades_today += 1
 
             return StockRiskCheckResult(approved=True, checks=checks)
