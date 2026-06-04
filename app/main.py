@@ -899,23 +899,25 @@ class TradingBot:
             return 1.0
         return 1.0
 
-    def _should_place_order(self, symbol: str, action: str) -> bool:
-        """Dedup gate: avoid duplicate / runaway orders for a symbol.
+    def _order_skip_reason(self, symbol: str, action: str) -> str:
+        """Dedup gate: return "" if an order may be placed, else a short reason.
 
         The intelligence loop re-evaluates every symbol every few seconds, so
         without this gate a persistent signal would fire an order every tick.
+        Returning the reason (instead of a bare bool) lets the heartbeat explain
+        exactly why an actionable decision didn't turn into an order.
         """
         sym = symbol.upper()
         now = time.time()
 
         # Per-symbol cooldown after a recent submit.
         if now - self._stock_last_order_ts.get(sym, 0.0) < self._stock_order_cooldown:
-            return False
+            return "cooldown"
 
         # Don't stack orders while one is still pending for this symbol.
         try:
             if any(o.symbol.upper() == sym for o in self._stock_execution.active_orders):
-                return False
+                return "pending_order"
         except Exception:
             pass
 
@@ -923,15 +925,18 @@ class TradingBot:
         if action == "buy":
             # Already long → don't add; cap distinct holdings at max-open-positions.
             if already_held:
-                return False
+                return "already_held"
             max_open = int(getattr(self._settings, "stock_max_open_positions", 0) or 0)
             if max_open > 0 and len(self._stock_held_symbols) >= max_open:
-                return False
-            return True
+                return "max_open_positions"
+            return ""
         if action == "sell":
             # Only exit positions we actually hold — never open shorts here.
-            return already_held
-        return False
+            return "" if already_held else "not_held"
+        return "unknown_action"
+
+    def _should_place_order(self, symbol: str, action: str) -> bool:
+        return self._order_skip_reason(symbol, action) == ""
 
     async def _sync_broker_positions(self) -> None:
         """Reconcile local state with broker truth.
@@ -1214,24 +1219,38 @@ class TradingBot:
                         except Exception:
                             pass
 
-                    if trace.action.value in {"buy", "sell"} and self._should_place_order(
-                        symbol, trace.action.value
-                    ):
-                        record = await self._stock_execution.process_signal(
-                            best_signal,
-                            features,
-                            portfolio_snap,
-                            broker=self._broker,
-                        )
-                        if record is not None and record.status != "rejected":
-                            scan_orders += 1
-                            self._stock_last_order_ts[symbol.upper()] = time.time()
-                            if trace.action.value == "buy":
-                                self._stock_held_symbols.add(symbol.upper())
-                                self._record_entry(
-                                    symbol, trace.strategy,
-                                    record.price, record.quantity,
+                    if trace.action.value in {"buy", "sell"}:
+                        skip = self._order_skip_reason(symbol, trace.action.value)
+                        if skip and skip != "not_held":
+                            # not_held is the normal long-only case (already
+                            # counted as sells_skipped); surface the rest so the
+                            # buy→order gap is explained in the heartbeat.
+                            k = f"skip:{skip}"
+                            scan_blocks[k] = scan_blocks.get(k, 0) + 1
+                        elif not skip:
+                            record = await self._stock_execution.process_signal(
+                                best_signal,
+                                features,
+                                portfolio_snap,
+                                broker=self._broker,
+                            )
+                            if record is not None and record.status != "rejected":
+                                scan_orders += 1
+                                self._stock_last_order_ts[symbol.upper()] = time.time()
+                                if trace.action.value == "buy":
+                                    self._stock_held_symbols.add(symbol.upper())
+                                    self._record_entry(
+                                        symbol, trace.strategy,
+                                        record.price, record.quantity,
+                                    )
+                            else:
+                                rej = (
+                                    record.status
+                                    if record is not None
+                                    else "no_record"
                                 )
+                                k = f"order_rejected:{rej}"
+                                scan_blocks[k] = scan_blocks.get(k, 0) + 1
 
                 except Exception as exc:
                     logger.error("stock_loop_error", symbol=symbol, error=str(exc))
