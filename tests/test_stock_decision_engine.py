@@ -154,7 +154,7 @@ class TestStockDecisionEngine:
         assert trace.blocked_reason is not None
 
     def test_llm_should_gate_trade_blocks(self) -> None:
-        s = _settings()
+        s = _settings(stock_llm_gating_enabled=True)
         eng = StockDecisionEngine(s, risk_manager=StockRiskManager(s))
         verdict = LLMVerdict(
             ticker="NVDA", sentiment="bearish", relevance_score=0.9,
@@ -168,6 +168,25 @@ class TestStockDecisionEngine:
         assert trace.action == StockDecisionAction.BLOCKED
         assert "LLM gated" in (trace.blocked_reason or "")
         assert trace.llm_should_gate is True
+
+    def test_llm_gate_is_advisory_by_default(self) -> None:
+        # With gating disabled (the equities default), a should_gate_trade
+        # verdict must NOT hard-block a strong L1 buy — the LLM only nudges.
+        s = _settings(stock_min_final_score=0.40)
+        eng = StockDecisionEngine(s, risk_manager=StockRiskManager(s))
+        # Neutral verdict that only flips should_gate_trade: the gate is the
+        # only thing that could block, so with gating off the buy goes through.
+        verdict = LLMVerdict(
+            ticker="NVDA", sentiment="neutral", relevance_score=0.0,
+            confidence_adjustment=0.0, should_gate_trade=True,
+            summary="phi3 is nervous",
+        )
+        trace = eng.evaluate(
+            "NVDA", _features(), _portfolio(),
+            l1_signal=_signal(confidence=0.85), llm_verdict=verdict,
+        )
+        assert "LLM gated" not in (trace.blocked_reason or "")
+        assert trace.action == StockDecisionAction.BUY
 
     def test_bearish_regime_blocks_long(self) -> None:
         s = _settings()

@@ -21,13 +21,16 @@ from app.stocks.strategies.base import BaseStockStrategy
 class StockMomentum(BaseStockStrategy):
     name = "stock_momentum"
 
-    MOMENTUM_THRESHOLD = 0.003
-    RSI_OVERBOUGHT = 70.0
+    # Loosened for activity: a ~0.15%/5min thrust on roughly average volume is
+    # enough to act on, instead of demanding a 0.3% move + 1.2x volume surge
+    # (which almost never co-occur on a quiet tape).
+    MOMENTUM_THRESHOLD = 0.0015
+    RSI_OVERBOUGHT = 72.0
     RSI_OVERSOLD = 30.0
-    MIN_VOLUME_SURGE = 1.2
+    MIN_VOLUME_SURGE = 1.0
     ATR_STOP_MULTIPLIER = 1.5
     REWARD_RISK = 2.0
-    COOLDOWN_BARS = 5
+    COOLDOWN_BARS = 3
 
     def __init__(self) -> None:
         self._last_signal_bar: dict[str, int] = {}

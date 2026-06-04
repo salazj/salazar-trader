@@ -59,7 +59,8 @@ class TestStatefulDetector:
         det = MarketRegimeDetector(lookback=20)
         for i, c in enumerate(_trending_up(40, 0.005)):
             det.update_close("SPY", c)
-        r = det.evaluate(atr_pct=0.01)
+        # Detector uses intraday-calibrated ATR bands (1-minute bars).
+        r = det.evaluate(atr_pct=0.0008)
         assert r.regime == MarketRegime.TRENDING_BULLISH
         assert det.last is r
 
@@ -69,5 +70,5 @@ class TestStatefulDetector:
             det.update_close("SPY", c)
         for c in _trending_up(40, 0.004):
             det.update_close("QQQ", c)
-        r = det.evaluate(atr_pct=0.01)
+        r = det.evaluate(atr_pct=0.0008)
         assert r.regime == MarketRegime.TRENDING_BULLISH

@@ -95,8 +95,17 @@ def classify_regime(
     vix: float | None = None,
     volume_ratio: float = 1.0,
     lookback: int = 20,
+    trend_threshold: float = 0.02,
+    high_vol_atr: float = 0.025,
+    risk_off_atr: float = 0.04,
+    low_vol_atr: float = 0.005,
 ) -> RegimeReading:
-    """Stateless single-shot classifier returning a ``RegimeReading``."""
+    """Stateless single-shot classifier returning a ``RegimeReading``.
+
+    The ATR/trend thresholds default to *daily*-scale values. The live bot
+    feeds 1-minute data, so :class:`MarketRegimeDetector` overrides them with
+    intraday-calibrated values (otherwise everything reads as low-volatility).
+    """
     spy_trend = _trend(spy_closes, lookback)
     qqq_trend = _trend(qqq_closes or [], lookback)
 
@@ -104,41 +113,41 @@ def classify_regime(
     if qqq_closes:
         avg_trend = 0.5 * spy_trend + 0.5 * qqq_trend
 
-    risk_off = (vix is not None and vix >= 30.0) or atr_pct >= 0.04
+    risk_off = (vix is not None and vix >= 30.0) or atr_pct >= risk_off_atr
 
     if risk_off:
         regime = MarketRegime.RISK_OFF
         score = -1.0
         confidence = 0.85
         rationale = (
-            f"VIX={vix} (>=30) or ATR%={atr_pct:.3f} (>=4%): risk-off"
+            f"VIX={vix} or ATR%={atr_pct:.4f} (>={risk_off_atr}): risk-off"
         )
-    elif atr_pct >= 0.025:
+    elif atr_pct >= high_vol_atr:
         regime = MarketRegime.HIGH_VOLATILITY
         score = avg_trend
         confidence = 0.7
-        rationale = f"ATR%={atr_pct:.3f}: high volatility"
-    elif avg_trend >= 0.02:
+        rationale = f"ATR%={atr_pct:.4f}: high volatility"
+    elif avg_trend >= trend_threshold:
         regime = MarketRegime.TRENDING_BULLISH
         score = avg_trend
         confidence = min(0.9, 0.5 + abs(avg_trend) * 5)
         rationale = f"SPY/QQQ {lookback}-bar trend +{avg_trend:.2%}"
-    elif avg_trend <= -0.02:
+    elif avg_trend <= -trend_threshold:
         regime = MarketRegime.TRENDING_BEARISH
         score = avg_trend
         confidence = min(0.9, 0.5 + abs(avg_trend) * 5)
         rationale = f"SPY/QQQ {lookback}-bar trend {avg_trend:.2%}"
-    elif atr_pct <= 0.005 and abs(avg_trend) < 0.005:
+    elif atr_pct <= low_vol_atr and abs(avg_trend) < trend_threshold:
         regime = MarketRegime.LOW_VOLATILITY
         score = 0.0
         confidence = 0.7
-        rationale = f"ATR%={atr_pct:.3f}, trend flat"
+        rationale = f"ATR%={atr_pct:.4f}, trend flat"
     else:
         regime = MarketRegime.RANGE_BOUND
         score = avg_trend
         confidence = 0.6
         rationale = (
-            f"trend {avg_trend:.2%} within +/-2%: range-bound"
+            f"trend {avg_trend:.2%} within threshold: range-bound"
         )
 
     return RegimeReading(
@@ -163,12 +172,28 @@ def classify_regime(
 class MarketRegimeDetector:
     """Stateful wrapper around ``classify_regime`` with rolling buffers."""
 
-    def __init__(self, lookback: int = 20, history_size: int = 200) -> None:
+    def __init__(
+        self,
+        lookback: int = 20,
+        history_size: int = 200,
+        *,
+        trend_threshold: float = 0.003,
+        high_vol_atr: float = 0.0015,
+        risk_off_atr: float = 0.003,
+        low_vol_atr: float = 0.0004,
+    ) -> None:
         self._lookback = lookback
         self._spy: list[float] = []
         self._qqq: list[float] = []
         self._max = history_size
         self._last: RegimeReading | None = None
+        # Intraday-calibrated thresholds (1-minute bars). A ~0.3% drift over the
+        # lookback window counts as trending; ATR% is per-minute so the volatility
+        # bands are ~10x tighter than the daily defaults in classify_regime.
+        self._trend_threshold = trend_threshold
+        self._high_vol_atr = high_vol_atr
+        self._risk_off_atr = risk_off_atr
+        self._low_vol_atr = low_vol_atr
 
     def update_close(self, symbol: str, close: float) -> None:
         s = symbol.upper()
@@ -193,6 +218,10 @@ class MarketRegimeDetector:
             vix=vix,
             volume_ratio=volume_ratio,
             lookback=self._lookback,
+            trend_threshold=self._trend_threshold,
+            high_vol_atr=self._high_vol_atr,
+            risk_off_atr=self._risk_off_atr,
+            low_vol_atr=self._low_vol_atr,
         )
         self._last = reading
         return reading

@@ -137,6 +137,7 @@ class StockDecisionEngine:
         self._w_l2 = w[1] / total
         self._w_l3 = w[2] / total
         self._min_score = settings.stock_min_final_score
+        self._llm_gating = bool(getattr(settings, "stock_llm_gating_enabled", False))
 
     @property
     def weights(self) -> dict[str, float]:
@@ -192,7 +193,11 @@ class StockDecisionEngine:
             l1_active, l2_active, l3_active
         )
 
-        final = l1 * eff_w_l1 + l2 * eff_w_l2 + l3 * eff_w_l3 + adj
+        # The LLM's confidence nudge is scaled by its (renormalized) weight so a
+        # small advisory model can't single-handedly drag a clean signal below
+        # the gate. With the L2 stub inactive, L3 weight renormalizes up, so it
+        # still has a meaningful — but bounded — say.
+        final = l1 * eff_w_l1 + l2 * eff_w_l2 + l3 * eff_w_l3 + adj * eff_w_l3
         final = max(-1.0, min(1.0, final))
 
         explanation_parts: list[str] = []
@@ -213,7 +218,7 @@ class StockDecisionEngine:
 
         if l1_signal is None:
             block_reason = "no L1 strategy signal"
-        elif verdict.should_gate_trade:
+        elif self._llm_gating and verdict.should_gate_trade:
             block_reason = f"LLM gated trade: {verdict.summary[:120]}"
         elif regime is not None and direction > 0 and not regime.allows_long:
             block_reason = (

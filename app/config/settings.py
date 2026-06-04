@@ -261,9 +261,15 @@ class Settings(BaseSettings):
     stock_l3_weight: float = Field(default=0.20, ge=0.0, le=1.0)
     # Final-score threshold below which trades are blocked. With dynamic weight
     # renormalization (inactive ML/LLM layers don't consume budget), a clean L1
-    # signal must reach this confidence on its own; 0.50 keeps decent selectivity
-    # while letting momentum/breakout setups through when ML/LLM are disabled.
-    stock_min_final_score: float = Field(default=0.50, ge=0.0, le=1.0)
+    # signal must reach this confidence on its own. 0.40 keeps a sane floor while
+    # letting solid momentum/breakout setups through (0.50 was too selective for
+    # the current L2-stub / advisory-L3 setup and starved the bot of trades).
+    stock_min_final_score: float = Field(default=0.40, ge=0.0, le=1.0)
+    # When False, the local LLM (L3) is advisory only: it nudges the fused score
+    # (scaled by its weight) but can never hard-veto a trade. A small local model
+    # like phi3 has no real edge on equities, so letting it gate trades just
+    # suppresses activity. Set True to restore hard LLM gating.
+    stock_llm_gating_enabled: bool = False
 
     # --- Local LLM (Jetson Orin Nano oriented) ---
     # Provider: "none", "llama_cpp", "ollama", "hosted_api" (compat shim)
