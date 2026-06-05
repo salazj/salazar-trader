@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -38,7 +38,68 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--timeframe", default="1Min", choices=["1Min", "5Min", "15Min", "1Hour", "1Day"])
     p.add_argument("--data-dir", default="data/bars")
     p.add_argument("--feed", default=None, help="iex or sip (default: account default)")
+    p.add_argument(
+        "--append",
+        action="store_true",
+        help=(
+            "Accumulate: if a ticker CSV already exists, fetch only bars newer "
+            "than the last stored one and append (dedup), growing the history "
+            "instead of overwriting. Missing files are seeded from --start."
+        ),
+    )
     return p.parse_args()
+
+
+_TIMEFRAME_MINUTES = {"1Min": 1, "5Min": 5, "15Min": 15, "1Hour": 60, "1Day": 1440}
+
+
+def _tail_timestamps(path: "Path", n: int = 6) -> list[datetime]:
+    """Read up to the last ``n`` data-row timestamps from a bar CSV."""
+    out: list[datetime] = []
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            block = min(size, 16384)
+            f.seek(size - block)
+            tail = f.read().decode("utf-8", "replace").strip().splitlines()
+        for line in reversed(tail):
+            cell = line.split(",", 1)[0].strip()
+            if not cell or cell.lower() == "timestamp":
+                continue
+            try:
+                out.append(datetime.fromisoformat(cell.replace("Z", "+00:00")))
+            except ValueError:
+                continue
+            if len(out) >= n:
+                break
+    except Exception:
+        return out
+    return out
+
+
+def _last_timestamp(path: "Path") -> datetime | None:
+    ts = _tail_timestamps(path, n=1)
+    return ts[0] if ts else None
+
+
+def _stored_spacing_minutes(path: "Path") -> float | None:
+    """Infer the bar spacing (minutes) of an existing store from its tail.
+
+    Used to refuse appending a different timeframe into the same file (which
+    would silently corrupt the dataset). Uses the smallest positive gap among
+    recent rows so intraday spacing — not the overnight gap — is detected.
+    """
+    ts = _tail_timestamps(path, n=6)
+    if len(ts) < 2:
+        return None
+    ts = sorted(ts)
+    gaps = [
+        (ts[i] - ts[i - 1]).total_seconds() / 60.0
+        for i in range(1, len(ts))
+        if ts[i] > ts[i - 1]
+    ]
+    return min(gaps) if gaps else None
 
 
 def _timeframe(tf: str):
@@ -85,10 +146,37 @@ def main() -> int:
 
     total = 0
     for ticker in tickers:
+        path = out_dir / f"{ticker}.csv"
+        # Append mode: only fetch bars newer than the last stored one so the
+        # history accumulates instead of being overwritten.
+        appending = False
+        last_ts = None
+        fetch_start = start
+        if args.append and path.exists() and path.stat().st_size > 0:
+            tf_minutes = _TIMEFRAME_MINUTES.get(args.timeframe, 1)
+            spacing = _stored_spacing_minutes(path)
+            if spacing is not None and abs(spacing - tf_minutes) > 0.01:
+                print(
+                    f"  {ticker}: SKIP — existing store is ~{spacing:g}min bars "
+                    f"but --timeframe={args.timeframe}. Clear data-dir to reseed.",
+                    file=sys.stderr,
+                )
+                continue
+            last_ts = _last_timestamp(path)
+            if last_ts is not None:
+                appending = True
+                # Re-fetch from one bar after the last stored timestamp.
+                step = timedelta(minutes=tf_minutes)
+                fetch_start = last_ts + step
+
+        if fetch_start >= end:
+            print(f"  {ticker}: already up to date ({last_ts})")
+            continue
+
         req_kwargs = dict(
             symbol_or_symbols=ticker,
             timeframe=_timeframe(args.timeframe),
-            start=start,
+            start=fetch_start,
             end=end,
         )
         if feed is not None:
@@ -100,21 +188,26 @@ def main() -> int:
             continue
 
         bars = resp.data.get(ticker, []) if hasattr(resp, "data") else []
+        # Guard against dup/overlap rows when appending.
+        if appending and last_ts is not None:
+            bars = [b for b in bars if b.timestamp > last_ts]
         if not bars:
-            print(f"  {ticker}: no bars returned")
+            print(f"  {ticker}: no new bars")
             continue
 
-        path = out_dir / f"{ticker}.csv"
-        with path.open("w", newline="") as f:
+        mode = "a" if appending else "w"
+        with path.open(mode, newline="") as f:
             w = csv.writer(f)
-            w.writerow(["timestamp", "open", "high", "low", "close", "volume"])
+            if not appending:
+                w.writerow(["timestamp", "open", "high", "low", "close", "volume"])
             for b in bars:
                 w.writerow([
                     b.timestamp.isoformat(),
                     b.open, b.high, b.low, b.close, int(b.volume),
                 ])
         total += len(bars)
-        print(f"  {ticker}: wrote {len(bars):,} bars → {path}")
+        verb = "appended" if appending else "wrote"
+        print(f"  {ticker}: {verb} {len(bars):,} bars → {path}")
 
     print(f"Done. {total:,} bars across {len(tickers)} tickers in {out_dir}/")
     return 0

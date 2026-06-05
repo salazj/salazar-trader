@@ -1526,9 +1526,11 @@ class TradingBot:
         s = self._settings
         tickers = s.stock_ml_retrain_tickers
         timeframe = s.stock_ml_retrain_timeframe
-        start = (
+        # Seed window used only when the store is empty; thereafter --append just
+        # adds the new day(s), so the dataset accumulates over time.
+        seed_start = (
             datetime.now(timezone.utc).date()
-            - timedelta(days=int(s.stock_ml_retrain_lookback_days))
+            - timedelta(days=int(s.stock_ml_retrain_seed_days))
         ).isoformat()
         data_dir = "data/bars"
         live_path = s.stock_ml_model_path
@@ -1536,7 +1538,7 @@ class TradingBot:
 
         logger.info(
             "stock_ml_retrain_started",
-            tickers=tickers, timeframe=timeframe, start=start,
+            tickers=tickers, timeframe=timeframe, seed_start=seed_start,
         )
 
         async def _run(cmd: list[str]) -> bool:
@@ -1557,12 +1559,13 @@ class TradingBot:
                 return False
             return True
 
-        # 1) Download fresh bars.
+        # 1) Accumulate bars: seed from seed_start on first run, then append-only
+        #    so the history grows by a day each night.
         if not await _run([
             python_exe, "scripts/download_stock_bars.py",
-            "--tickers", tickers, "--start", start,
+            "--tickers", tickers, "--start", seed_start,
             "--timeframe", timeframe, "--data-dir", data_dir,
-            "--feed", "iex",
+            "--feed", "iex", "--append",
         ]):
             return False
 

@@ -311,7 +311,12 @@ class Settings(BaseSettings):
         "SPY,QQQ,IWM,GLD,AAPL,MSFT,NVDA,TSLA,AMD,META,AMZN,GOOGL"
     )
     stock_ml_retrain_timeframe: str = "5Min"
-    stock_ml_retrain_lookback_days: int = Field(default=180, ge=20)
+    # The bar store is ACCUMULATING: the first retrain seeds this many days of
+    # history, then every subsequent night only appends the new day(s). So the
+    # dataset grows over time and the model trains on an ever-longer history
+    # (e.g. start with 1y, after running 5y the store holds ~6y). 5-minute bars
+    # keep the nightly full-retrain fast even after years of accumulation.
+    stock_ml_retrain_seed_days: int = Field(default=365, ge=20)
     stock_ml_retrain_horizon: int = Field(default=10, ge=1)
     # 0.0 trains a balanced up/down directional model (recommended for daily).
     stock_ml_retrain_up_threshold: float = Field(default=0.0, ge=0.0)
