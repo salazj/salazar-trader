@@ -45,33 +45,51 @@ class AlpacaStreaming(BaseBrokerStreaming):
 
     async def subscribe_quotes(self, symbols: list[str]) -> None:
         new = [s for s in symbols if s not in self._pending_quotes]
+        if not new:
+            return
         self._pending_quotes.extend(new)
-        if self._stream is not None and new:
-            self._stream.subscribe_quotes(self._handle_quote, *new)
+        await self._apply_subscription_change()
 
     async def subscribe_bars(self, symbols: list[str]) -> None:
         new = [s for s in symbols if s not in self._pending_bars]
+        if not new:
+            return
         self._pending_bars.extend(new)
-        if self._stream is not None and new:
-            self._stream.subscribe_bars(self._handle_bar, *new)
-            logger.info("alpaca_bars_subscribed", symbols=new)
+        logger.info("alpaca_bars_subscribed", symbols=new)
+        await self._apply_subscription_change()
 
     async def subscribe_trades(self, symbols: list[str]) -> None:
         new = [s for s in symbols if s not in self._pending_trades]
+        if not new:
+            return
         self._pending_trades.extend(new)
-        if self._stream is not None and new:
-            self._stream.subscribe_trades(self._handle_trade, *new)
+        await self._apply_subscription_change()
 
     async def unsubscribe_bars(self, symbols: list[str]) -> None:
-        for s in symbols:
-            if s in self._pending_bars:
-                self._pending_bars.remove(s)
-        if self._stream is not None and symbols:
+        removed = [s for s in symbols if s in self._pending_bars]
+        for s in removed:
+            self._pending_bars.remove(s)
+        if removed:
+            logger.info("alpaca_bars_unsubscribed", symbols=removed)
+            await self._apply_subscription_change()
+
+    async def _apply_subscription_change(self) -> None:
+        """Apply a subscription change to a (possibly running) stream safely.
+
+        alpaca-py's live ``subscribe_*`` / ``unsubscribe_*`` methods block the
+        event loop when called on an already-running socket from the loop thread
+        (they wait on an internal future that can't resolve while the loop is
+        blocked) — a deadlock that silently freezes the whole bot. To avoid it
+        entirely we never mutate a live stream in place: we bounce the socket so
+        ``connect()``'s reconnect loop rebuilds a fresh stream subscribed to the
+        updated pending set. The new subscriptions are picked up on reconnect.
+        """
+        if self._stream is not None and self._connected:
             try:
-                self._stream.unsubscribe_bars(*symbols)
-                logger.info("alpaca_bars_unsubscribed", symbols=list(symbols))
+                await self._stream.stop_ws()
+                logger.info("alpaca_stream_resubscribe_bounce")
             except Exception as exc:
-                logger.warning("alpaca_unsubscribe_failed", error=str(exc))
+                logger.warning("alpaca_resubscribe_bounce_failed", error=str(exc))
 
     async def subscribe_order_updates(self) -> None:
         self._subscribe_orders = True
