@@ -409,6 +409,11 @@ class TradingBot:
         # operator can see why no trades fire without flooding the log.
         self._stock_last_heartbeat_ts = 0.0
         self._stock_last_closed_log_ts = 0.0
+        # Daily ML auto-retrain bookkeeping: the ET date we last retrained on, so
+        # it fires at most once per calendar day, and a guard so a slow retrain
+        # never overlaps itself.
+        self._stock_last_retrain_date: str | None = None
+        self._stock_retrain_in_progress = False
 
         # Hook the NLP pipeline so every classified headline updates the
         # hot-ticker tracker (drives news_driven / news_plus_movers modes)
@@ -805,6 +810,8 @@ class TradingBot:
         ]
         if self._stock_universe.is_dynamic:
             tasks.append(self._stock_universe_refresh_loop())
+        if getattr(self._settings, "stock_ml_auto_retrain", False):
+            tasks.append(self._stock_ml_retrain_loop())
         await asyncio.gather(*tasks)
 
     async def _stop_equities(self) -> None:
@@ -1466,6 +1473,126 @@ class TradingBot:
             self._stock_last_order_ts[sym] = time.time()
         except Exception as exc:
             logger.error("stock_close_position_failed", symbol=sym, error=str(exc))
+
+    async def _stock_ml_retrain_loop(self) -> None:
+        """Retrain the L2 model once per day after the close and hot-swap it.
+
+        Runs entirely off the critical path: the heavy work (bar download +
+        feature replay + fit) happens in a subprocess writing to a *temp* model
+        file, so a slow or failed retrain never blocks the event loop or
+        corrupts the live model. Only after the fresh model loads cleanly is it
+        atomically moved into place and swapped into ``self._stock_ml`` — no
+        restart required. Fires at most once per ET calendar day.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        retrain_hour = int(getattr(self._settings, "stock_ml_retrain_hour_et", 20))
+
+        while self._running:
+            await asyncio.sleep(900.0)  # check every 15 min
+            try:
+                now_et = datetime.now(et)
+                today = now_et.strftime("%Y-%m-%d")
+                # Once per day, only after the configured off-hours time, and
+                # never while the regular session is open.
+                if (
+                    self._stock_retrain_in_progress
+                    or self._stock_last_retrain_date == today
+                    or now_et.hour < retrain_hour
+                    or self._broker.is_market_open()
+                ):
+                    continue
+
+                self._stock_retrain_in_progress = True
+                self._stock_last_retrain_date = today
+                ok = await self._run_ml_retrain()
+                logger.info("stock_ml_retrain_cycle", date=today, success=ok)
+            except Exception as exc:
+                logger.error("stock_ml_retrain_loop_error", error=str(exc))
+            finally:
+                self._stock_retrain_in_progress = False
+
+    async def _run_ml_retrain(self) -> bool:
+        """Download fresh bars, train to a temp file, then hot-swap on success."""
+        import os
+        import sys
+        from datetime import datetime, timedelta, timezone
+        from pathlib import Path
+
+        python_exe = sys.executable
+        project_root = str(Path(__file__).resolve().parents[1])
+        s = self._settings
+        tickers = s.stock_ml_retrain_tickers
+        timeframe = s.stock_ml_retrain_timeframe
+        start = (
+            datetime.now(timezone.utc).date()
+            - timedelta(days=int(s.stock_ml_retrain_lookback_days))
+        ).isoformat()
+        data_dir = "data/bars"
+        live_path = s.stock_ml_model_path
+        tmp_path = f"{live_path}.tmp"
+
+        logger.info(
+            "stock_ml_retrain_started",
+            tickers=tickers, timeframe=timeframe, start=start,
+        )
+
+        async def _run(cmd: list[str]) -> bool:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await proc.communicate()
+            if proc.returncode != 0:
+                logger.error(
+                    "stock_ml_retrain_subprocess_failed",
+                    cmd=cmd[1] if len(cmd) > 1 else cmd[0],
+                    rc=proc.returncode,
+                    tail=(out or b"")[-500:].decode("utf-8", "replace"),
+                )
+                return False
+            return True
+
+        # 1) Download fresh bars.
+        if not await _run([
+            python_exe, "scripts/download_stock_bars.py",
+            "--tickers", tickers, "--start", start,
+            "--timeframe", timeframe, "--data-dir", data_dir,
+            "--feed", "iex",
+        ]):
+            return False
+
+        # 2) Train to a temp artifact (never clobber the live model on failure).
+        if not await _run([
+            python_exe, "scripts/train_stock_ml.py",
+            "--tickers", tickers, "--data-dir", data_dir,
+            "--horizon", str(s.stock_ml_retrain_horizon),
+            "--up-threshold", str(s.stock_ml_retrain_up_threshold),
+            "--out", tmp_path,
+        ]):
+            return False
+
+        # 3) Validate the fresh model loads and is usable, then hot-swap.
+        try:
+            from app.stocks.ml import StockMLPredictor
+            candidate = StockMLPredictor.load(tmp_path)
+            if not candidate.is_ready:
+                logger.error("stock_ml_retrain_invalid", reason="model not ready")
+                return False
+            os.replace(tmp_path, live_path)
+            self._stock_ml = candidate
+            logger.info(
+                "stock_ml_retrain_done",
+                path=live_path, version=candidate.version,
+            )
+            return True
+        except Exception as exc:
+            logger.error("stock_ml_retrain_swap_failed", error=str(exc))
+            return False
 
     async def _stock_universe_refresh_loop(self) -> None:
         """Periodically re-pick the active stock universe.

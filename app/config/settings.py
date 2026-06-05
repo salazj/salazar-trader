@@ -298,6 +298,24 @@ class Settings(BaseSettings):
     stock_ml_min_samples: int = Field(default=200, ge=50)
     regime_lookback_bars: int = Field(default=60, ge=10)
 
+    # --- Automatic daily L2 retrain (off-hours, hot-swapped) ---
+    # When enabled, the bot retrains the L2 model once per day after the close
+    # using a lighter/faster config than the manual full train, then hot-swaps
+    # the new model in-place (no restart). Defaults are sized to finish in a few
+    # minutes on a Jetson (5-minute bars over ~6 months on a liquid subset).
+    stock_ml_auto_retrain: bool = False
+    # Hour (US/Eastern, 0-23) after which the daily retrain may run. 20 = 8pm ET,
+    # safely after the 4pm close and any post-market flatten.
+    stock_ml_retrain_hour_et: int = Field(default=20, ge=0, le=23)
+    stock_ml_retrain_tickers: str = (
+        "SPY,QQQ,IWM,GLD,AAPL,MSFT,NVDA,TSLA,AMD,META,AMZN,GOOGL"
+    )
+    stock_ml_retrain_timeframe: str = "5Min"
+    stock_ml_retrain_lookback_days: int = Field(default=180, ge=20)
+    stock_ml_retrain_horizon: int = Field(default=10, ge=1)
+    # 0.0 trains a balanced up/down directional model (recommended for daily).
+    stock_ml_retrain_up_threshold: float = Field(default=0.0, ge=0.0)
+
     # --- Storage ---
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'salazar-trader.db'}"
 
