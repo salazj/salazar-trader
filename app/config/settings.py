@@ -72,18 +72,13 @@ class Settings(BaseSettings):
     poly_api_secret: str = ""
     poly_passphrase: str = ""
 
-    # --- Kalshi API ---
-    kalshi_api_key: str = ""
-    kalshi_private_key: str = ""
-    kalshi_private_key_path: str = ""
-    kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
-    kalshi_ws_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
-    kalshi_demo_mode: bool = True
-
     # --- Alpaca (Stock Broker) ---
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
+    # Market-data feed: "iex" (free) or "sip" (paid). Free/paper accounts only
+    # have IEX access; requesting SIP returns empty bars.
+    alpaca_data_feed: str = "iex"
 
     # --- Risk Limits (Prediction Markets) ---
     max_position_per_market: float = Field(default=10.0, ge=0)
@@ -127,6 +122,14 @@ class Settings(BaseSettings):
     nlp_provider: str = "mock"
     nlp_providers: str = ""
     news_poll_interval: int = Field(default=300, ge=10)
+    # Cap how many (deduplicated, newest-first) news items are LLM-classified
+    # per poll cycle. Bounds load on a local model (e.g. phi3 on a Jetson) so
+    # classification finishes inside the poll window. 0 = unlimited.
+    news_max_classify_per_cycle: int = Field(default=40, ge=0)
+    # Equities only: skip LLM classification for headlines that name no
+    # tradeable ticker/company (resolved against the curated name table).
+    # Slashes wasted inference; hot-ticker discovery is unaffected.
+    news_relevance_prefilter: bool = True
     news_file_dir: str = "data/news"
     newsapi_key: str = ""
     rss_feed_urls: str = ""
@@ -177,8 +180,17 @@ class Settings(BaseSettings):
     universe_mode: str = "auto"
 
     # --- Stock Universe Selection ---
+    # Modes:
+    #   manual           — fixed list from STOCK_TICKERS
+    #   auto             — Alpaca catalog scan (legacy, weak filters)
+    #   news_driven      — STOCK_TICKERS core + hot tickers from news
+    #   top_movers       — STOCK_TICKERS core + Alpaca top movers
+    #   news_plus_movers — STOCK_TICKERS core + hot tickers + top movers
     stock_universe_mode: str = "manual"
     stock_tickers: str = ""
+    # Approved ticker allow-list — risk manager refuses anything outside this set.
+    # Defaults to highly-liquid large-caps suitable for Alpaca paper trading.
+    approved_stock_tickers: str = "SPY,QQQ,AAPL,MSFT,NVDA,TSLA,AMD,META,AMZN,GOOGL"
     stock_min_volume: int = 100000
     stock_min_price: float = 5.0
     stock_max_price: float = 500.0
@@ -186,12 +198,128 @@ class Settings(BaseSettings):
     max_stock_symbols: int = 20
     allow_extended_hours: bool = False
 
-    # --- Stock Risk Limits ---
-    stock_max_position_dollars: float = Field(default=1000.0, ge=0)
-    stock_max_portfolio_dollars: float = Field(default=10000.0, ge=0)
-    stock_max_daily_loss_dollars: float = Field(default=500.0, ge=0)
-    stock_max_open_positions: int = Field(default=10, ge=1)
-    stock_max_orders_per_minute: int = Field(default=10, ge=1)
+    # --- Dynamic Universe (news_driven / top_movers modes) ---
+    # Comma-separated candidate pool for the top-movers screener.
+    # Empty = use the built-in S&P 100 + liquid-ETF list.
+    stock_universe_candidates: str = ""
+    # How often (seconds) to re-run the dynamic universe selection.
+    stock_universe_refresh_seconds: int = Field(default=900, ge=60)
+    # Hot-ticker tracker parameters.
+    stock_hot_ticker_ttl_minutes: int = Field(default=120, ge=5)
+    stock_max_hot_tickers: int = Field(default=10, ge=0)
+    stock_hot_min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
+    stock_hot_min_relevance: float = Field(default=0.3, ge=0.0, le=1.0)
+    # Top-movers screener parameters.
+    stock_movers_top_n: int = Field(default=10, ge=0)
+    stock_movers_min_dollar_volume: float = Field(default=10_000_000.0, ge=0.0)
+
+    # --- Stock Risk Limits (beginner-safe Jetson defaults) ---
+    # NOTE: defaults are deliberately tiny ($50/position, $250 portfolio,
+    # $25 daily loss, 3 open positions, 5 trades/day). Override via env for
+    # larger accounts.
+    stock_max_position_dollars: float = Field(default=50.0, ge=0)
+    stock_max_portfolio_dollars: float = Field(default=250.0, ge=0)
+    stock_max_daily_loss_dollars: float = Field(default=25.0, ge=0)
+    stock_max_open_positions: int = Field(default=3, ge=1)
+    # Risk-based position sizing: dollars risked per trade (entry→stop distance).
+    # When > 0 and a stop is known, quantity = risk_dollars / per-share-risk,
+    # capped by max position notional and available cash. 0 = fixed-notional.
+    stock_risk_per_trade_dollars: float = Field(default=10.0, ge=0)
+    # Liquidity gate for the movers screener: reject names whose bid/ask spread
+    # exceeds this many basis points (illiquid → bad fills). 0 = disabled.
+    stock_max_spread_bps: float = Field(default=50.0, ge=0)
+    stock_max_orders_per_minute: int = Field(default=3, ge=1)
+    stock_max_trades_per_day: int = Field(default=5, ge=1)
+    # Per-symbol cooldown (seconds) after submitting an order, to stop the
+    # intelligence loop from firing duplicate orders on a persistent signal.
+    stock_order_cooldown_seconds: float = Field(default=300.0, ge=0)
+    stock_require_stop_loss: bool = True
+    # Allow short selling: act on bearish signals by selling-to-open a short
+    # (protected by a broker-side stop above and target below). When False the
+    # bot is long-only and bearish signals on flat names are ignored. Shorting
+    # requires a margin-enabled Alpaca account and doubles opportunity at the
+    # cost of theoretically unbounded upside risk — kept off by default.
+    stock_allow_shorts: bool = False
+    # --- Position management (live exits beyond the broker bracket) ---
+    # Flatten all positions this many minutes before the regular close (0=off).
+    stock_eod_flatten_minutes: float = Field(default=10.0, ge=0)
+    # Time-stop: close a position open longer than this many minutes (0=off).
+    stock_max_holding_minutes: float = Field(default=240.0, ge=0)
+    # Bot-side trailing stop: once in profit, exit if price falls this fraction
+    # from its peak since entry (0=off; complements the broker stop).
+    stock_trailing_stop_pct: float = Field(default=0.0, ge=0, le=1)
+    # Self-tuning: pause a strategy that is net-losing after a minimum sample of
+    # closed trades (re-enabled on the next UTC day / restart).
+    stock_strategy_auto_disable: bool = True
+    stock_strategy_min_trades_eval: int = Field(default=8, ge=1)
+    # Revenge-trading guard: block new entries on the same symbol after N
+    # consecutive losing exits within a session.
+    stock_max_consecutive_losses_per_symbol: int = Field(default=2, ge=1)
+    # Maximum bar age (seconds) tolerated by risk manager — blocks stale data.
+    # IEX (free Alpaca feed) prints sparse bars for less-liquid names; 120s was
+    # too tight and produced spurious "stale data" blocks. 300s tolerates normal
+    # IEX gaps while still rejecting genuinely stale data (e.g. a dead stream).
+    stock_max_bar_age_seconds: int = Field(default=300, ge=10)
+
+    # --- Three-layer decision weights for stock trading ---
+    stock_l1_weight: float = Field(default=0.50, ge=0.0, le=1.0)
+    stock_l2_weight: float = Field(default=0.30, ge=0.0, le=1.0)
+    stock_l3_weight: float = Field(default=0.20, ge=0.0, le=1.0)
+    # Final-score threshold below which trades are blocked. With dynamic weight
+    # renormalization (inactive ML/LLM layers don't consume budget), a clean L1
+    # signal must reach this confidence on its own. 0.40 keeps a sane floor while
+    # letting solid momentum/breakout setups through (0.50 was too selective for
+    # the current L2-stub / advisory-L3 setup and starved the bot of trades).
+    stock_min_final_score: float = Field(default=0.40, ge=0.0, le=1.0)
+    # When False, the local LLM (L3) is advisory only: it nudges the fused score
+    # (scaled by its weight) but can never hard-veto a trade. A small local model
+    # like phi3 has no real edge on equities, so letting it gate trades just
+    # suppresses activity. Set True to restore hard LLM gating.
+    stock_llm_gating_enabled: bool = False
+
+    # --- Local LLM (Jetson Orin Nano oriented) ---
+    # Provider: "none", "llama_cpp", "ollama", "hosted_api" (compat shim)
+    local_llm_provider: str = "none"
+    # Used by llama_cpp provider — path to a quantized GGUF file.
+    local_llm_model_path: str = "models/qwen2.5-3b-instruct-q4.gguf"
+    # Used by ollama provider — model tag.
+    local_llm_model_name: str = "qwen2.5:3b-instruct-q4_K_M"
+    local_llm_endpoint: str = "http://127.0.0.1:11434"
+    local_llm_context_size: int = Field(default=2048, ge=512)
+    local_llm_threads: int = Field(default=4, ge=1)
+    local_llm_gpu_layers: int = Field(default=20, ge=0)
+    local_llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    local_llm_max_tokens: int = Field(default=512, ge=16)
+    local_llm_timeout_seconds: float = Field(default=20.0, ge=0.05)
+    local_llm_cache_ttl_seconds: int = Field(default=1800, ge=30)
+
+    # --- Stock ML / regime ---
+    stock_ml_model_path: str = "model_artifacts/stock_xgb_v1.pkl"
+    stock_ml_min_samples: int = Field(default=200, ge=50)
+    regime_lookback_bars: int = Field(default=60, ge=10)
+
+    # --- Automatic daily L2 retrain (off-hours, hot-swapped) ---
+    # When enabled, the bot retrains the L2 model once per day after the close
+    # using a lighter/faster config than the manual full train, then hot-swaps
+    # the new model in-place (no restart). Defaults are sized to finish in a few
+    # minutes on a Jetson (5-minute bars over ~6 months on a liquid subset).
+    stock_ml_auto_retrain: bool = False
+    # Hour (US/Eastern, 0-23) after which the daily retrain may run. 20 = 8pm ET,
+    # safely after the 4pm close and any post-market flatten.
+    stock_ml_retrain_hour_et: int = Field(default=20, ge=0, le=23)
+    stock_ml_retrain_tickers: str = (
+        "SPY,QQQ,IWM,GLD,AAPL,MSFT,NVDA,TSLA,AMD,META,AMZN,GOOGL"
+    )
+    stock_ml_retrain_timeframe: str = "5Min"
+    # The bar store is ACCUMULATING: the first retrain seeds this many days of
+    # history, then every subsequent night only appends the new day(s). So the
+    # dataset grows over time and the model trains on an ever-longer history
+    # (e.g. start with 1y, after running 5y the store holds ~6y). 5-minute bars
+    # keep the nightly full-retrain fast even after years of accumulation.
+    stock_ml_retrain_seed_days: int = Field(default=365, ge=20)
+    stock_ml_retrain_horizon: int = Field(default=10, ge=1)
+    # 0.0 trains a balanced up/down directional model (recommended for daily).
+    stock_ml_retrain_up_threshold: float = Field(default=0.0, ge=0.0)
 
     # --- Storage ---
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'salazar-trader.db'}"
@@ -233,8 +361,21 @@ class Settings(BaseSettings):
     @field_validator("exchange")
     @classmethod
     def validate_exchange(cls, v: str) -> str:
-        allowed = {"polymarket", "kalshi"}
+        allowed = {"polymarket"}
         v = v.lower()
+        # Backward-compat: Kalshi support was removed. Quietly migrate stale
+        # deployment .env files (EXCHANGE=kalshi) to the only supported
+        # prediction-market exchange instead of crashing startup — the field
+        # is inactive in equities mode anyway.
+        if v == "kalshi":
+            import warnings
+
+            warnings.warn(
+                "EXCHANGE=kalshi is no longer supported; falling back to "
+                "'polymarket'. Update your .env to remove this warning.",
+                stacklevel=2,
+            )
+            return "polymarket"
         if v not in allowed:
             raise ValueError(f"exchange must be one of {allowed}")
         return v
@@ -293,19 +434,28 @@ class Settings(BaseSettings):
         return bool(self.private_key and self.poly_api_key and self.poly_api_secret)
 
     @property
-    def has_kalshi_credentials(self) -> bool:
-        return bool(self.kalshi_api_key and (self.kalshi_private_key or self.kalshi_private_key_path))
-
-    @property
     def has_alpaca_credentials(self) -> bool:
         return bool(self.alpaca_api_key and self.alpaca_secret_key)
+
+    @property
+    def approved_ticker_set(self) -> set[str]:
+        """Set of upper-cased approved tickers from ``approved_stock_tickers``."""
+        return {
+            t.strip().upper()
+            for t in self.approved_stock_tickers.split(",")
+            if t.strip()
+        }
+
+    def is_ticker_approved(self, symbol: str) -> bool:
+        approved = self.approved_ticker_set
+        if not approved:
+            return True
+        return symbol.upper() in approved
 
     @property
     def has_credentials(self) -> bool:
         if self.asset_class == "equities":
             return self.has_alpaca_credentials
-        if self.exchange == "kalshi":
-            return self.has_kalshi_credentials
         return self.has_polymarket_credentials
 
     def require_live_trading(self) -> None:
@@ -323,33 +473,32 @@ class Settings(BaseSettings):
                 "This is a deliberate third safety gate."
             )
         if not self.has_credentials:
-            if self.exchange == "kalshi":
-                raise RuntimeError(
-                    "Kalshi live trading requires KALSHI_API_KEY and "
-                    "KALSHI_PRIVATE_KEY_PATH to be set in .env"
-                )
-            else:
-                raise RuntimeError(
-                    "Polymarket live trading requires PRIVATE_KEY, POLY_API_KEY, "
-                    "POLY_API_SECRET, and POLY_PASSPHRASE to be set in .env"
-                )
+            raise RuntimeError(
+                "Polymarket live trading requires PRIVATE_KEY, POLY_API_KEY, "
+                "POLY_API_SECRET, and POLY_PASSPHRASE to be set in .env"
+            )
 
     def require_credentials(self) -> None:
         """Backwards-compatible alias — delegates to full check."""
         self.require_live_trading()
 
     def __repr__(self) -> str:
-        """Override repr to redact secrets — omits secret fields entirely."""
+        """Override repr to redact secrets — replaces secret values with ``***``."""
         _SECRETS = {
             "private_key", "poly_api_key", "poly_api_secret", "poly_passphrase",
-            "llm_api_key", "kalshi_api_key", "kalshi_private_key", "kalshi_private_key_path",
+            "llm_api_key",
             "newsapi_key", "alpaca_api_key", "alpaca_secret_key",
+            "claude_api_key", "finnhub_api_key", "betstack_api_key",
         }
-        safe_fields = {
-            k: v
-            for k, v in self.__dict__.items()
-            if not k.startswith("_") and k not in _SECRETS
-        }
+        safe_fields = {}
+        for k, v in self.__dict__.items():
+            if k.startswith("_"):
+                continue
+            if k in _SECRETS:
+                if v:
+                    safe_fields[k] = "***"
+                continue
+            safe_fields[k] = v
         return f"Settings({safe_fields})"
 
     def ensure_dirs(self) -> None:

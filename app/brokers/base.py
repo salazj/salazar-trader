@@ -91,6 +91,53 @@ class BaseBrokerExecution(ABC):
     def is_dry_run(self) -> bool:
         """Whether this client is in simulation mode."""
 
+    async def place_bracket_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        *,
+        stop_price: float | None = None,
+        take_profit_price: float | None = None,
+        order_type: OrderType = OrderType.MARKET,
+        price: float | None = None,
+        time_in_force: TimeInForce = TimeInForce.DAY,
+    ) -> dict[str, Any]:
+        """Submit an entry with attached protective exit legs.
+
+        Default implementation falls back to a plain entry order (no broker-side
+        protection) for brokers that don't support brackets. Alpaca overrides
+        this with a true bracket/OTO order.
+        """
+        return await self.place_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            price=price,
+            stop_price=stop_price,
+            time_in_force=time_in_force,
+        )
+
+    async def close_position(self, symbol: str) -> dict[str, Any]:
+        """Flatten an open position for ``symbol``. Default: no-op."""
+        return {"symbol": symbol, "status": "unsupported"}
+
+    async def cancel_orders_for_symbol(self, symbol: str) -> int:
+        """Cancel all resting orders for ``symbol``. Returns count cancelled."""
+        count = 0
+        try:
+            for o in await self.get_open_orders():
+                if str(o.get("symbol", "")).upper() == symbol.upper():
+                    try:
+                        await self.cancel_order(str(o.get("id", "")))
+                        count += 1
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return count
+
 
 class BaseBrokerStreaming(ABC):
     """Real-time data feed via WebSocket for stock brokers."""

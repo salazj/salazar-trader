@@ -25,7 +25,10 @@ from app.api.schemas import (
     ValidationResult,
 )
 from app.config.settings import Settings, get_settings
+from app.llm import LocalLLMService
 from app.monitoring import get_logger
+from app.regime.detector import MarketRegimeDetector
+from app.stocks.decision import DecisionStore, PerformanceTracker
 
 logger = get_logger(__name__)
 
@@ -49,6 +52,11 @@ class BotManager:
         self._cached_balance: float = 0.0
         self._balance_fetched_at: float = 0.0
         self._balance_lock = asyncio.Lock()
+        # Stock-side accessors (populated lazily once the bot is running).
+        self._decision_store = DecisionStore()
+        self._performance_tracker = PerformanceTracker()
+        self._regime_detector: MarketRegimeDetector | None = None
+        self._llm_service: LocalLLMService | None = None
 
     # ── Status ─────────────────────────────────────────────────────────
 
@@ -158,17 +166,15 @@ class BotManager:
                 return self._cached_balance
             try:
                 settings = get_settings()
-                if settings.has_kalshi_credentials:
-                    from app.exchanges.kalshi.execution import KalshiExecutionClient
-                    client = KalshiExecutionClient(settings)
-                    try:
-                        balance = await client.get_balance()
-                        self._cached_balance = balance
-                        self._balance_fetched_at = time.time()
-                        logger.info("idle_balance_fetched", balance=balance)
-                        return balance
-                    finally:
-                        await client.close()
+                if settings.has_alpaca_credentials:
+                    from app.brokers.alpaca.execution import AlpacaExecution
+                    client = AlpacaExecution(settings)
+                    account = await client.get_account()
+                    balance = float(account.get("portfolio_value", 0.0))
+                    self._cached_balance = balance
+                    self._balance_fetched_at = time.time()
+                    logger.info("idle_balance_fetched", balance=balance)
+                    return balance
                 return 0.0
             except Exception as e:
                 logger.warning("idle_balance_fetch_error", error=str(e))
@@ -331,6 +337,77 @@ class BotManager:
             raise RuntimeError("Bot is not running")
         self._bot._risk_manager.trip_circuit_breaker(reason)
 
+    # ── Stock decision / regime / LLM accessors ────────────────────────
+
+    @property
+    def decision_store(self) -> DecisionStore:
+        return self._decision_store
+
+    @property
+    def performance_tracker(self) -> PerformanceTracker:
+        return self._performance_tracker
+
+    def attach_regime_detector(self, detector: MarketRegimeDetector) -> None:
+        self._regime_detector = detector
+
+    def attach_llm_service(self, service: LocalLLMService) -> None:
+        self._llm_service = service
+
+    def get_recent_decisions(self, limit: int = 50) -> list[dict]:
+        store = self._resolve_decision_store()
+        if store is None:
+            return []
+        return [t.to_dict() for t in store.recent(limit=limit)]
+
+    def get_current_regime(self) -> dict | None:
+        detector = self._resolve_regime_detector()
+        if detector is None or detector.last is None:
+            return None
+        return detector.last.to_dict()
+
+    def get_performance_summary(self) -> dict:
+        from dataclasses import asdict
+        tracker = self._resolve_performance_tracker()
+        if tracker is None:
+            return asdict(self._performance_tracker.summary())
+        return asdict(tracker.summary())
+
+    def get_llm_status(self) -> dict | None:
+        svc = self._resolve_llm_service()
+        if svc is None:
+            return None
+        return svc.status()
+
+    # ── Resolution helpers (bot-running vs. idle) ──────────────────────
+
+    def _resolve_decision_store(self):
+        if self._bot is not None:
+            store = getattr(self._bot, "_stock_decision_store", None)
+            if store is not None:
+                return store
+        return self._decision_store
+
+    def _resolve_regime_detector(self):
+        if self._bot is not None:
+            detector = getattr(self._bot, "_stock_regime", None)
+            if detector is not None:
+                return detector
+        return self._regime_detector
+
+    def _resolve_performance_tracker(self):
+        if self._bot is not None:
+            tracker = getattr(self._bot, "_stock_performance", None)
+            if tracker is not None:
+                return tracker
+        return self._performance_tracker
+
+    def _resolve_llm_service(self):
+        if self._bot is not None:
+            svc = getattr(self._bot, "_stock_llm_service", None)
+            if svc is not None:
+                return svc
+        return self._llm_service
+
     # ── Services ───────────────────────────────────────────────────────
 
     def get_service_stats(self) -> list[dict]:
@@ -383,7 +460,7 @@ class BotManager:
             errors.append(f"Invalid asset_class: {config.asset_class}")
 
         if config.asset_class == "prediction_markets":
-            if config.exchange not in ("polymarket", "kalshi"):
+            if config.exchange not in ("polymarket",):
                 errors.append(f"Invalid exchange: {config.exchange}")
         elif config.asset_class == "equities":
             if config.broker not in ("alpaca",):
@@ -415,9 +492,6 @@ class BotManager:
             if config.asset_class == "equities":
                 if not env_settings.has_alpaca_credentials:
                     errors.append("Missing Alpaca API credentials in .env")
-            elif config.exchange == "kalshi":
-                if not env_settings.has_kalshi_credentials:
-                    errors.append("Missing Kalshi credentials in .env")
             else:
                 if not env_settings.has_polymarket_credentials:
                     errors.append("Missing Polymarket credentials in .env")

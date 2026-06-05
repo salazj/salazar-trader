@@ -1,7 +1,7 @@
 """
 Abstract base classes for exchange adapters.
 
-Every exchange (Polymarket, Kalshi, etc.) must implement these interfaces
+Every exchange (Polymarket, etc.) must implement these interfaces
 so the rest of the system can remain exchange-agnostic.
 """
 
@@ -16,7 +16,6 @@ from app.data.models import Market, Order, OrderbookSnapshot, Position
 
 class Exchange(str, Enum):
     POLYMARKET = "polymarket"
-    KALSHI = "kalshi"
 
 
 MessageHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]

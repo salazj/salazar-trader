@@ -26,12 +26,13 @@ class TestAssetRouting:
         )
         assert s2.has_credentials is True
 
-    def test_has_credentials_kalshi(self):
+    def test_has_credentials_polymarket(self):
         s = Settings(
             asset_class="prediction_markets",
-            exchange="kalshi",
-            kalshi_api_key="key",
-            kalshi_private_key="pk",
+            exchange="polymarket",
+            private_key="0xabc",
+            poly_api_key="key",
+            poly_api_secret="secret",
         )
         assert s.has_credentials is True
 

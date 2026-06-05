@@ -24,7 +24,7 @@ became (or didn't become) a trading signal.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from app.data.models import Market, SignalAction
 from app.decision.ensemble import normalize_confidence
@@ -38,6 +38,9 @@ from app.utils.helpers import utc_now
 
 if TYPE_CHECKING:
     from app.news.models import NewsItem
+
+
+ClassifiedHook = Callable[["NewsItem", ClassificationResult], None]
 
 logger = get_logger(__name__)
 
@@ -87,6 +90,42 @@ class NlpPipeline:
         self._normalizer = normalizer or TextNormalizer()
         self._min_relevance = min_relevance_for_signal
         self._min_confidence = min_confidence_for_signal
+        self._classified_hooks: list[ClassifiedHook] = []
+        self._prefilter: Callable[[str], bool] | None = None
+
+    @property
+    def prefilter(self) -> Callable[[str], bool] | None:
+        return self._prefilter
+
+    def set_prefilter(self, fn: Callable[[str], bool] | None) -> None:
+        """Install a cheap relevance gate run *before* classification.
+
+        The predicate receives the normalized headline text and returns
+        ``True`` if the item is worth classifying. Items that fail are
+        dropped without ever touching the (expensive) LLM classifier. Used
+        by the equities path to skip headlines that mention no tradeable
+        ticker, sparing a local model from a flood of irrelevant news.
+        """
+        self._prefilter = fn
+
+    def add_classified_hook(self, hook: ClassifiedHook) -> None:
+        """Register a callback invoked for every successfully-classified item.
+
+        Hooks fire after classification but **before** market mapping, so the
+        equities pipeline can capture entities for hot-ticker tracking even
+        when no prediction-market matches exist. Exceptions inside hooks are
+        logged and swallowed so they never break the news loop.
+        """
+        self._classified_hooks.append(hook)
+
+    def _fire_classified_hooks(
+        self, item: "NewsItem", result: ClassificationResult
+    ) -> None:
+        for hook in self._classified_hooks:
+            try:
+                hook(item, result)
+            except Exception:
+                logger.exception("nlp_classified_hook_error")
 
     def process_item(
         self,
@@ -111,6 +150,14 @@ class NlpPipeline:
 
         clean_text = norm.normalized
 
+        # ── Step 1b: Cheap relevance gate (skip the LLM for irrelevant news) ──
+        if self._prefilter is not None and not self._prefilter(clean_text):
+            trace.dropped_reason = "prefilter_irrelevant"
+            trace.steps.append("dropped: prefilter (no tradeable entity)")
+            logger.debug("nlp_item_prefiltered", item_id=item.item_id)
+            self._log_trace(trace)
+            return []
+
         # ── Step 2: Map to markets (before classification so we can pass context) ──
         pre_matches = self._mapper.find_matches(
             text=clean_text,
@@ -130,6 +177,8 @@ class NlpPipeline:
         result = self._classifier.classify(clean_text, market_context)
         trace.classification = result
         trace.steps.append(f"classified: {result.event_type.value}/{result.sentiment.value}")
+
+        self._fire_classified_hooks(item, result)
 
         if result.relevance < self._min_relevance and result.confidence < self._min_confidence:
             trace.dropped_reason = f"low_relevance({result.relevance:.2f})_and_confidence({result.confidence:.2f})"

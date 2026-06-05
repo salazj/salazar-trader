@@ -5,7 +5,7 @@
 $alazar-Trader is a multi-asset trading platform with a web GUI. The architecture has five major layers:
 
 1. **Trading Core** — data ingestion, features, strategies, ML, NLP, decision engine, risk, execution, portfolio
-2. **Exchange/Broker Adapters** — Polymarket, Kalshi (prediction markets), Alpaca (stocks)
+2. **Exchange/Broker Adapters** — Polymarket (prediction markets), Alpaca (stocks)
 3. **Control API Backend** — FastAPI server managing the bot lifecycle, config, and streaming
 4. **Web GUI Frontend** — React dashboard with real-time updates via WebSocket
 5. **Docker Orchestration** — Docker Compose with backend, frontend, and optional standalone bot
@@ -23,7 +23,7 @@ nginx (frontend container, port 3000)
 
 FastAPI Backend (port 8000)
     ├── BotManager → TradingBot (async task)
-    │       ├── Exchange Adapters (Polymarket, Kalshi)
+    │       ├── Exchange Adapters (Polymarket)
     │       └── Broker Adapters (Alpaca)
     ├── REST endpoints (status, config, portfolio, risk)
     ├── WebSocket endpoints (logs, status, portfolio)

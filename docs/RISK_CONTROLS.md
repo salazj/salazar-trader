@@ -1,147 +1,81 @@
 # Risk Controls
 
-## Philosophy
+Risk control is the **single source of truth** for whether an order
+leaves this process. Neither the LLM, the ML predictor, nor the
+strategy ensemble can bypass it — all three feed into the decision
+engine, which then asks `StockRiskManager.check_order()`. If the gate
+denies the order, the order is dropped and a `StockDecisionTrace` is
+recorded with `action="blocked"` and the reason.
 
-This system is designed with the assumption that **the default behavior should be to NOT trade**. Every order must pass through multiple independent safety checks. A single failed check blocks the order.
+---
 
-The system does not promise profits. It is designed to protect capital.
+## Beginner-safe Jetson defaults
 
-## Pre-Trade Risk Checks
+| Setting                                  | Default | Purpose                                  |
+|------------------------------------------|--------:|------------------------------------------|
+| `STOCK_MAX_POSITION_DOLLARS`             | `50`    | Max notional per order.                  |
+| `STOCK_MAX_PORTFOLIO_DOLLARS`            | `250`   | Max total stock exposure.                |
+| `STOCK_MAX_DAILY_LOSS_DOLLARS`           | `25`    | Daily-loss circuit breaker.              |
+| `STOCK_MAX_OPEN_POSITIONS`               | `3`     | Max concurrent positions.                |
+| `STOCK_MAX_ORDERS_PER_MINUTE`            | `3`     | Order frequency cap.                     |
+| `STOCK_MAX_TRADES_PER_DAY`               | `5`     | New entries per day.                     |
+| `STOCK_REQUIRE_STOP_LOSS`                | `true`  | Buys must include a stop price.          |
+| `STOCK_MAX_CONSECUTIVE_LOSSES_PER_SYMBOL`| `2`     | Revenge-trade guard.                     |
+| `STOCK_MAX_BAR_AGE_SECONDS`              | `120`   | Reject stale market data.                |
+| `ALLOW_EXTENDED_HOURS`                   | `false` | Reject trades outside RTH.               |
+| `APPROVED_STOCK_TICKERS`                 | SPY,QQQ,AAPL,MSFT,NVDA,TSLA,AMD,META,AMZN,GOOGL | Universe allow-list. |
 
-All checks execute sequentially. ALL must pass for an order to be submitted.
+These defaults are intentional and tiny — they let a beginner run for
+weeks on paper without losing more than $25 in any session.
 
-### 1. Emergency Stop File
-- **What**: Checks for a file named `EMERGENCY_STOP` in the project root.
-- **How to trigger**: `touch EMERGENCY_STOP`
-- **How to clear**: `rm EMERGENCY_STOP`
-- **Effect**: Blocks all orders immediately.
+---
 
-### 2. Circuit Breaker
-- **What**: A software kill switch that requires manual reset.
-- **Triggers**: Max daily loss exceeded, max consecutive losses.
-- **Reset**: Requires restarting the bot or calling `risk_manager.reset_circuit_breaker()`.
+## Pre-trade gate order
 
-### 3. Daily Loss Limit
-- **Default**: $10 (configurable via `MAX_DAILY_LOSS`)
-- **Calculation**: Realized PnL + unrealized PnL since start of day.
-- **Effect**: Trips the circuit breaker.
+`StockRiskManager.check_order` runs each gate in order and returns the
+first denial. The `checks` list on the result records which gates were
+evaluated, even on approval.
 
-### 4. Consecutive Losses
-- **Default**: 5 (configurable via `MAX_CONSECUTIVE_LOSSES`)
-- **Effect**: Trips the circuit breaker.
+1. Emergency stop file present (`./EMERGENCY_STOP`).
+2. Circuit breaker tripped.
+3. Daily loss limit exceeded.
+4. Ticker not in `APPROVED_STOCK_TICKERS`.
+5. Bar timestamp older than `STOCK_MAX_BAR_AGE_SECONDS`.
+6. Buy order missing a stop price (when `STOCK_REQUIRE_STOP_LOSS=true`).
+7. Order notional > `STOCK_MAX_POSITION_DOLLARS`.
+8. Portfolio + order > `STOCK_MAX_PORTFOLIO_DOLLARS`.
+9. Open positions >= `STOCK_MAX_OPEN_POSITIONS` on a buy.
+10. Trades-today >= `STOCK_MAX_TRADES_PER_DAY` on a buy.
+11. Per-minute order rate > `STOCK_MAX_ORDERS_PER_MINUTE`.
+12. Market closed (when `ALLOW_EXTENDED_HOURS=false`).
+13. Insufficient cash on a buy.
+14. Revenge-trade guard: same symbol with `>= STOCK_MAX_CONSECUTIVE_LOSSES_PER_SYMBOL` recent losses.
 
-### 5. Order Frequency
-- **Default**: 6 orders per minute (configurable via `MAX_ORDERS_PER_MINUTE`)
-- **Effect**: Temporarily blocks new orders until rate drops.
+---
 
-### 6. Stale Data Lockout
-- **Threshold**: 30 seconds since last WebSocket update.
-- **Effect**: Blocks all orders until fresh data arrives.
+## Three-gate live trading lock
 
-### 7. Spread Guard
-- **Min spread**: 1 cent (`MIN_SPREAD_THRESHOLD`) — avoids trading in extremely tight markets.
-- **Max spread**: 15 cents (`MAX_SPREAD_THRESHOLD`) — avoids illiquid markets with wide spreads.
+Live orders require all three of:
 
-### 8. Liquidity Depth Guard
-- **Default**: $20 combined depth within 5 cents (`MIN_LIQUIDITY_DEPTH`)
-- **Effect**: Blocks orders in thin books.
-
-### 9. Slippage Guard
-- **Default**: 3 cents max deviation from midpoint (`MAX_SLIPPAGE`)
-- **Effect**: Prevents orders priced far from fair value.
-
-### 10. Market Exposure Limit
-- **Default**: $10 per market (`MAX_POSITION_PER_MARKET`)
-- **Effect**: Caps concentration in any single market.
-
-### 11. Total Exposure Limit
-- **Default**: $50 across all markets (`MAX_TOTAL_EXPOSURE`)
-- **Effect**: Caps overall portfolio risk.
-
-### 12. Volatility Lockout
-- **Threshold**: 10% 1-minute volatility.
-- **Effect**: Blocks orders during abnormally volatile periods.
-
-### 13. Cash Sufficiency
-- **What**: Verifies available cash covers the order cost before submission.
-- **Effect**: Rejects buy orders that would exceed available cash.
-
-## Three Safety Gates for Live Trading
-
-Live trading requires **all three** of these to be explicitly set:
-
-| Gate | Environment Variable | Default |
-|------|---------------------|---------|
-| 1 | `DRY_RUN=false` | true |
-| 2 | `ENABLE_LIVE_TRADING=true` | false |
-| 3 | `LIVE_TRADING_ACKNOWLEDGED=true` | false |
-
-Plus valid API credentials (`PRIVATE_KEY`, `POLY_API_KEY`, `POLY_API_SECRET`).
-
-If any gate is missing, the system refuses to submit real orders. There are also code-level safety re-checks in the trading client that block live orders even if configuration is somehow bypassed.
-
-## AI Cannot Override Risk
-
-The decision engine (three-layer ensemble) produces trade candidates, but **risk management is always deterministic**. No AI signal — regardless of how strongly all three intelligence layers agree — can bypass or weaken any risk check. The risk manager sits between the decision engine and execution, and it has absolute veto power.
-
-## Additional Safeguards
-
-### Order Deduplication
-The execution engine rejects orders with the same token + side + price as an existing active order.
-
-### Stale Order Cleanup
-Orders older than 5 minutes are automatically canceled by the housekeeping loop.
-
-### Limit Orders Only
-Market orders are not supported. All orders are limit orders to prevent unexpected fills at bad prices.
-
-### Manual Kill Switch
-At any time, create an `EMERGENCY_STOP` file to halt all trading:
-```bash
-touch EMERGENCY_STOP    # halt
-rm EMERGENCY_STOP       # resume
+```
+DRY_RUN=false
+ENABLE_LIVE_TRADING=true
+LIVE_TRADING_ACKNOWLEDGED=true
 ```
 
-## Recommended Starting Parameters
+Plus valid `ALPACA_API_KEY` / `ALPACA_SECRET_KEY`. Anything less and
+the bot stays in dry-run / paper mode.
 
-For a $100 bankroll, first-time user:
+---
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| DRY_RUN | true | Always start in simulation |
-| DEFAULT_ORDER_SIZE | $1.00 | Tiny size for learning |
-| MAX_POSITION_PER_MARKET | $10.00 | 10% of bankroll per market |
-| MAX_TOTAL_EXPOSURE | $50.00 | 50% max deployment |
-| MAX_DAILY_LOSS | $10.00 | 10% daily drawdown limit |
-| MAX_ORDERS_PER_MINUTE | 6 | Prevent overtrading |
-| MAX_CONSECUTIVE_LOSSES | 5 | Auto-halt on losing streak |
+## Emergency stop
 
-## Stock-Specific Risk Controls
+Two paths:
 
-When running in equities mode (`ASSET_CLASS=equities`), additional risk controls apply:
+* `./EMERGENCY_STOP` file: the risk manager refuses every order while
+  this file exists. Useful for `kill-switch` cron jobs.
+* `POST /api/risk/emergency-stop` with body `{"confirm": true}`. The
+  confirm flag is required; the dashboard shows a confirmation modal.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `STOCK_MAX_POSITION_DOLLARS` | $1,000 | Maximum dollar value per stock position |
-| `STOCK_MAX_PORTFOLIO_DOLLARS` | $10,000 | Maximum total portfolio exposure |
-| `STOCK_MAX_DAILY_LOSS_DOLLARS` | $500 | Daily loss limit before circuit breaker |
-| `STOCK_MAX_OPEN_POSITIONS` | 10 | Maximum concurrent positions |
-| `STOCK_MAX_ORDERS_PER_MINUTE` | 10 | Order frequency limit |
-| `ALLOW_EXTENDED_HOURS` | false | Whether to trade outside regular hours |
-
-### Market Hours Gate
-When `ALLOW_EXTENDED_HOURS=false`, the stock risk manager blocks all orders outside NYSE regular hours (9:30 AM - 4:00 PM ET, Mon-Fri).
-
-### GUI Risk Controls
-The web GUI provides a dedicated Risk Controls page at `/risk` with:
-- Real-time risk state monitoring
-- Circuit breaker reset button
-- Emergency stop button (double-confirmation required)
-- Risk parameter display
-
-## Monitoring Risk in Production
-
-1. Watch structured logs for `risk_check_failed` and `CIRCUIT_BREAKER_TRIPPED` events.
-2. Use the web GUI Risk page at `http://localhost:3000/risk` for real-time monitoring.
-3. Monitor the `metrics.snapshot()` counters for `risk_rejections` and `orders_rejected_risk`.
-4. Keep the emergency stop file mechanism ready.
+`POST /api/risk/reset-circuit-breaker` clears a tripped breaker — the
+bot does **not** auto-reset on its own.

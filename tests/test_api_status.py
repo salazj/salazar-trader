@@ -36,7 +36,7 @@ class TestStatusEndpoints:
         data = resp.json()
         ids = [e["id"] for e in data]
         assert "polymarket" in ids
-        assert "kalshi" in ids
+        assert "kalshi" not in ids
         assert "alpaca" in ids
 
     def test_strategies_list(self, client):

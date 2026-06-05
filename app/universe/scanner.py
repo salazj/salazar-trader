@@ -27,7 +27,7 @@ _SPORTS_PREFIXES = (
     "KXUFC", "KXMMA", "KXSOCCER",
 )
 
-# Kalshi pagination is non-deterministic for KXMVESPORTS* markets.
+# Sports-market pagination is non-deterministic for KXMVESPORTS* markets.
 # Don't mark them resolved unless missing for several consecutive scans.
 _SPORTS_GRACE_SCANS = 5
 

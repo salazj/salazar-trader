@@ -14,7 +14,6 @@ import {
   FolderOpen,
   Layers,
   Shield,
-  Target,
   Globe,
   Cpu,
   Check,
@@ -140,7 +139,7 @@ export default function Config() {
 
   const isLive = !config.dry_run && config.enable_live_trading && config.live_trading_acknowledged;
 
-  type ModeKey = "polymarket" | "kalshi" | "stocks";
+  type ModeKey = "polymarket" | "stocks";
   const selectedMode: ModeKey =
     config.asset_class === "equities" ? "stocks" : (config.exchange as ModeKey);
 
@@ -161,14 +160,6 @@ export default function Config() {
       desc: "Decentralized prediction market on Polygon",
       color: "border-indigo-500 bg-indigo-950/20",
       glow: "shadow-indigo-500/20 shadow-lg",
-    },
-    {
-      key: "kalshi",
-      icon: <Target className="h-7 w-7" />,
-      label: "Kalshi",
-      desc: "Regulated event contracts exchange",
-      color: "border-violet-500 bg-violet-950/20",
-      glow: "shadow-violet-500/20 shadow-lg",
     },
     {
       key: "stocks",

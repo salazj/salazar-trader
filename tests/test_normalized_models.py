@@ -52,7 +52,7 @@ class TestInstrument:
         inst = Instrument(
             symbol="will-x-happen",
             asset_class=AssetClass.PREDICTION_MARKETS,
-            exchange="kalshi",
+            exchange="polymarket",
             instrument_id="KX-ABC-123",
         )
         assert inst.asset_class == AssetClass.PREDICTION_MARKETS

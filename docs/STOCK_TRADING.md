@@ -1,86 +1,117 @@
-# Stock Trading Guide
+# Stock Trading (Alpaca, Jetson Orin Nano)
 
-$alazar-Trader supports stock (equities) trading via the Alpaca broker adapter.
+Salazar-Trader's equities path is the primary use-case on Jetson Orin
+Nano. It targets stocks and ETFs through the Alpaca paper/live API
+with deterministic risk controls and a three-layer decision engine.
 
-## Setup
+---
 
-### 1. Get Alpaca API Keys
+## Quick start
 
-1. Create an account at [alpaca.markets](https://alpaca.markets)
-2. Go to Dashboard > API Keys
-3. Generate a new API key pair
+1. Sign up at <https://app.alpaca.markets/> and get a paper API key.
+2. Copy `.env.example` to `.env` and set:
 
-### 2. Configure `.env`
+   ```
+   ASSET_CLASS=equities
+   BROKER=alpaca
+   ALPACA_API_KEY=...
+   ALPACA_SECRET_KEY=...
+   ALPACA_PAPER=true
+   DRY_RUN=true
+   ENABLE_LIVE_TRADING=false
+   LIVE_TRADING_ACKNOWLEDGED=false
+   ```
+3. Run:
 
-```env
-ASSET_CLASS=equities
-BROKER=alpaca
+   ```bash
+   bash scripts/setup_jetson.sh    # first time only
+   source .venv/bin/activate
+   python -m app.api
+   ```
 
-ALPACA_API_KEY=your-key-id
-ALPACA_SECRET_KEY=your-secret-key
-ALPACA_PAPER=true    # Use paper trading (strongly recommended)
+Open the dashboard at `http://<jetson-ip>:3000`.
+
+---
+
+## Modes
+
+| Mode                         | Required env                                                          | Behaviour                                |
+|------------------------------|-----------------------------------------------------------------------|------------------------------------------|
+| **Dry run (default)**        | `DRY_RUN=true`                                                        | Simulates fills locally — no broker API. |
+| **Alpaca paper trading**     | `DRY_RUN=false`, `ALPACA_PAPER=true`                                  | Sends orders to Alpaca paper endpoint.   |
+| **Live trading**             | All three gates true + creds present                                  | Real orders. Requires explicit GUI ack.  |
+
+Live trading is locked behind:
+
 ```
-
-### 3. Stock Universe Selection
-
-Two modes:
-
-**Manual mode** — trade only specific tickers:
-```env
-STOCK_UNIVERSE_MODE=manual
-STOCK_TICKERS=AAPL,MSFT,NVDA,TSLA,AMZN
-```
-
-**Filtered mode** — dynamically select stocks:
-```env
-STOCK_UNIVERSE_MODE=filtered
-STOCK_MIN_VOLUME=100000
-STOCK_MIN_PRICE=5.0
-STOCK_MAX_PRICE=500.0
-STOCK_SECTOR_INCLUDE=technology,healthcare
-MAX_STOCK_SYMBOLS=20
-```
-
-### 4. Risk Limits
-
-```env
-STOCK_MAX_POSITION_DOLLARS=1000.0
-STOCK_MAX_PORTFOLIO_DOLLARS=10000.0
-STOCK_MAX_DAILY_LOSS_DOLLARS=500.0
-STOCK_MAX_OPEN_POSITIONS=10
-STOCK_MAX_ORDERS_PER_MINUTE=10
-ALLOW_EXTENDED_HOURS=false
-```
-
-## Strategies
-
-| Strategy | Description |
-|----------|-------------|
-| `stock_momentum` | EMA-9 crossover + volume surge + RSI filter |
-| `stock_mean_reversion` | Buy below VWAP with low RSI, sell at VWAP |
-| `stock_breakout` | Buy on high-of-day breakout with volume confirmation |
-| `stock_news_gated` | Gate entries on symbols with bullish NLP signals |
-
-## How Stocks Differ from Prediction Markets
-
-- **Market hours**: Stock trading respects NYSE hours (9:30-16:00 ET). Extended hours can be enabled.
-- **Risk units**: Stock risk is dollar-based (max $1,000 per position) rather than contract-based.
-- **Strategies**: Stock strategies use technical indicators (RSI, EMA, ATR, VWAP) rather than probability models.
-- **Order types**: Stocks support market, limit, stop, and stop-limit orders.
-- **Universe**: Stock universe selection uses volume, price, and sector filters.
-
-## Dry Run Default
-
-Stock trading defaults to `DRY_RUN=true`. In dry-run mode:
-- No API calls are made to Alpaca
-- Orders are simulated locally
-- All strategies, risk checks, and features run normally
-- Logs show `[DRY]` prefix for simulated fills
-
-To enable paper trading (real API calls to Alpaca's paper environment):
-```env
 DRY_RUN=false
 ENABLE_LIVE_TRADING=true
 LIVE_TRADING_ACKNOWLEDGED=true
-ALPACA_PAPER=true
 ```
+
+The risk manager will still reject any order that violates the limits
+in `RISK_CONTROLS.md`.
+
+---
+
+## Strategies
+
+Implemented in `app/stocks/strategies/` (registered in
+`STRATEGY_REGISTRY`):
+
+| Name                  | Idea                                                                 |
+|-----------------------|----------------------------------------------------------------------|
+| `stock_momentum`      | EMA9>EMA21, price above VWAP, RSI not overbought, volume surge, ATR stop. |
+| `stock_mean_reversion`| Price below VWAP with oversold RSI; targets VWAP reversion.          |
+| `stock_breakout`      | High-of-day breakout with relative-volume confirmation; avoids chasing far from VWAP. |
+| `stock_pullback`      | Established uptrend, pullback to EMA21/VWAP with cooling RSI and bounce confirmation. |
+| `stock_news_gated`    | Filter gate: only allows BUY when NLP/LLM sentiment is bullish.      |
+
+Each strategy emits a `StockSignal` with `action`, `confidence`,
+`suggested_price`, `stop_price`, and `rationale`. The decision engine
+selects the highest-confidence non-HOLD signal as the L1 input.
+
+---
+
+## Three-layer decision engine
+
+```
+L1 — strategy signal (-1..+1, signed by direction × confidence)
+L2 — ML probability of upward move (-1..+1)
+L3 — local LLM sentiment × relevance (-1..+1)
+        + bounded confidence_adjustment (±0.25)
+
+final_score = L1*W1 + L2*W2 + L3*W3 + adjustment
+```
+
+Default weights (Jetson):
+
+```
+STOCK_L1_WEIGHT=0.50
+STOCK_L2_WEIGHT=0.30
+STOCK_L3_WEIGHT=0.20
+STOCK_MIN_FINAL_SCORE=0.55
+```
+
+Trades are sent only when **all** of these are true:
+
+* `final_score >= STOCK_MIN_FINAL_SCORE` (or matching short threshold).
+* L1 signal exists and is non-HOLD.
+* `LLMVerdict.should_gate_trade` is `false`.
+* The market regime allows the requested direction.
+* `StockRiskManager.check_order()` approves.
+
+Every evaluation produces a `StockDecisionTrace` (visible at
+`GET /api/decisions/recent`) showing every score and the exact
+`blocked_reason` when a trade is rejected.
+
+---
+
+## Default ticker universe
+
+```
+SPY, QQQ, AAPL, MSFT, NVDA, TSLA, AMD, META, AMZN, GOOGL
+```
+
+The risk manager refuses any ticker outside `APPROVED_STOCK_TICKERS`.
+Add more — but keep them highly liquid so slippage assumptions hold.

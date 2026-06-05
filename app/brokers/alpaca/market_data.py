@@ -18,6 +18,7 @@ class AlpacaMarketData(BaseBrokerMarketData):
         self._api_key = settings.alpaca_api_key
         self._secret_key = settings.alpaca_secret_key
         self._paper = settings.alpaca_paper
+        self._feed_name = (getattr(settings, "alpaca_data_feed", "") or "iex").lower()
         self._client: Any = None
 
     def _ensure_client(self) -> Any:
@@ -60,17 +61,38 @@ class AlpacaMarketData(BaseBrokerMarketData):
         if client is None:
             return []
         try:
+            from datetime import datetime, timedelta, timezone
+
+            from alpaca.data.enums import DataFeed
             from alpaca.data.requests import StockBarsRequest
             from alpaca.data.timeframe import TimeFrame
-            tf = TimeFrame.Minute
+
+            feed = DataFeed.SIP if self._feed_name == "sip" else DataFeed.IEX
+            # Anchor the request with an explicit lookback so it returns data
+            # even when the market is closed (a bare ``limit`` with no ``start``
+            # can come back empty overnight). Span enough calendar days that
+            # ``limit`` minute bars are always covered (markets trade ~390
+            # min/day, so ~10 trading days per 3000 bars + weekend buffer).
+            trading_days = max(2, (limit // 390) + 2)
+            lookback_days = trading_days + (trading_days // 5) * 2 + 4
+            start = datetime.now(timezone.utc) - timedelta(days=lookback_days)
             req = StockBarsRequest(
                 symbol_or_symbols=symbol,
-                timeframe=tf,
+                timeframe=TimeFrame.Minute,
+                start=start,
                 limit=limit,
+                feed=feed,
             )
             bars = client.get_stock_bars(req)
+            # Use .data.get() to avoid alpaca-py raising KeyError ("No key X was
+            # found.") when a symbol legitimately has no bars in the window.
+            data = getattr(bars, "data", {}) or {}
+            symbol_bars = data.get(symbol, [])
+            # Keep only the most recent ``limit`` bars (the API may return more).
+            if len(symbol_bars) > limit:
+                symbol_bars = symbol_bars[-limit:]
             result = []
-            for bar in bars[symbol]:
+            for bar in symbol_bars:
                 result.append({
                     "symbol": symbol,
                     "open": float(bar.open),
@@ -81,6 +103,8 @@ class AlpacaMarketData(BaseBrokerMarketData):
                     "timestamp": bar.timestamp.isoformat() if hasattr(bar.timestamp, "isoformat") else str(bar.timestamp),
                     "vwap": float(bar.vwap) if hasattr(bar, "vwap") and bar.vwap else None,
                 })
+            if not result:
+                logger.warning("alpaca_bars_empty", symbol=symbol, feed=feed.value)
             return result
         except Exception as exc:
             logger.error("alpaca_bars_error", symbol=symbol, error=str(exc))

@@ -1,7 +1,7 @@
 """
 Tests for exchange base interfaces and adapter contracts.
 
-Verifies that both Polymarket and Kalshi adapters implement all required
+Verifies that the Polymarket adapter implements all required
 abstract methods from the base classes.
 """
 
@@ -24,12 +24,8 @@ class TestExchangeEnum:
     def test_polymarket_value(self):
         assert Exchange.POLYMARKET.value == "polymarket"
 
-    def test_kalshi_value(self):
-        assert Exchange.KALSHI.value == "kalshi"
-
     def test_string_comparison(self):
         assert Exchange.POLYMARKET == "polymarket"
-        assert Exchange.KALSHI == "kalshi"
 
 
 class TestBaseInterfaces:
@@ -83,35 +79,6 @@ class TestPolymarketImplementation:
         from app.exchanges.polymarket.adapter import PolymarketAdapter
         adapter = PolymarketAdapter(settings)
         assert adapter.exchange == Exchange.POLYMARKET
-        assert adapter.market_data is not None
-        assert adapter.execution is not None
-        assert adapter.websocket is not None
-
-
-class TestKalshiImplementation:
-    """Verify Kalshi adapter fully implements the base interfaces."""
-
-    def test_adapter_implements_base(self):
-        from app.exchanges.kalshi.adapter import KalshiAdapter
-        assert issubclass(KalshiAdapter, BaseExchangeAdapter)
-
-    def test_market_data_implements_base(self):
-        from app.exchanges.kalshi.market_data import KalshiMarketDataClient
-        assert issubclass(KalshiMarketDataClient, BaseMarketDataClient)
-
-    def test_execution_implements_base(self):
-        from app.exchanges.kalshi.execution import KalshiExecutionClient
-        assert issubclass(KalshiExecutionClient, BaseExecutionClient)
-
-    def test_websocket_implements_base(self):
-        from app.exchanges.kalshi.websocket import KalshiWebSocketClient
-        assert issubclass(KalshiWebSocketClient, BaseWebSocketClient)
-
-    def test_adapter_instantiation(self, settings):
-        from app.exchanges.kalshi.adapter import KalshiAdapter
-        settings.exchange = "kalshi"
-        adapter = KalshiAdapter(settings)
-        assert adapter.exchange == Exchange.KALSHI
         assert adapter.market_data is not None
         assert adapter.execution is not None
         assert adapter.websocket is not None

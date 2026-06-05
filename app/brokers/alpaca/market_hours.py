@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 
+try:
+    from zoneinfo import ZoneInfo
 
-_NYSE_TZ_OFFSET = timedelta(hours=-5)
+    _NYSE_TZ: timezone | "ZoneInfo" = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - fallback if tzdata is unavailable
+    # Approximate US Eastern; does NOT handle DST. Only used if zoneinfo fails.
+    _NYSE_TZ = timezone(timedelta(hours=-5))
 
 _MARKET_OPEN = time(9, 30)
 _MARKET_CLOSE = time(16, 0)
@@ -33,6 +38,20 @@ class MarketHoursManager:
             (_PRE_MARKET_OPEN <= t < _MARKET_OPEN)
             or (_MARKET_CLOSE <= t < _AFTER_HOURS_CLOSE)
         )
+
+    def minutes_to_close(self) -> float:
+        """Minutes remaining until regular close. Returns a large number when
+        the regular session is not currently open."""
+        now_et = self._now_et()
+        if now_et.weekday() >= 5 or not (
+            _MARKET_OPEN <= now_et.time() < _MARKET_CLOSE
+        ):
+            return 1e9
+        close_dt = now_et.replace(
+            hour=_MARKET_CLOSE.hour, minute=_MARKET_CLOSE.minute,
+            second=0, microsecond=0,
+        )
+        return (close_dt - now_et).total_seconds() / 60.0
 
     def next_market_open(self) -> datetime:
         now_et = self._now_et()
@@ -64,5 +83,5 @@ class MarketHoursManager:
 
     @staticmethod
     def _now_et() -> datetime:
-        """Current time in approximate US Eastern (UTC-5, no DST handling)."""
-        return datetime.now(timezone(timedelta(hours=-5)))
+        """Current time in US Eastern, DST-aware (America/New_York)."""
+        return datetime.now(_NYSE_TZ)

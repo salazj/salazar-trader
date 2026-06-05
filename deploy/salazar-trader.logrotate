@@ -1,0 +1,17 @@
+# Log rotation for Salazar Trader's /var/log/salazar-trader.log
+#
+# Install:
+#   sudo cp deploy/salazar-trader.logrotate /etc/logrotate.d/salazar-trader
+#   (logrotate runs daily via cron/systemd-timer automatically)
+#
+# Keeps 14 days of compressed daily logs, ~no unbounded growth.
+
+/var/log/salazar-trader.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

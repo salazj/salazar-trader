@@ -20,7 +20,7 @@ async def test_market_save():
         question="Will it rain tomorrow?",
         slug="will-it-rain",
         end_date="2026-03-15T00:00:00Z",
-        exchange="kalshi",
+        exchange="polymarket",
     )
 
     result = _to_iso(m.end_date)
@@ -64,7 +64,7 @@ async def test_bot_manager_orders():
     item = OrderItem(
         order_id="ORD-1",
         instrument_id="INS-1",
-        exchange="kalshi",
+        exchange="polymarket",
         side="buy",
         price=0.50,
         size=10,
@@ -78,20 +78,20 @@ async def test_bot_manager_orders():
 
 
 async def test_live_market_scan():
-    """Fetch real markets from Kalshi and test the save_market path."""
+    """Fetch real markets from Polymarket and test the save_market path."""
     from app.config.settings import get_settings
     from app.storage.repository import _to_iso
 
     settings = get_settings()
-    if not settings.has_kalshi_credentials:
-        print("  [SKIP] No Kalshi credentials")
+    if not settings.has_polymarket_credentials:
+        print("  [SKIP] No Polymarket credentials")
         return
 
-    from app.exchanges.kalshi.market_data import KalshiMarketDataClient
-    client = KalshiMarketDataClient(settings)
+    from app.exchanges.polymarket.market_data import PolymarketMarketDataClient
+    client = PolymarketMarketDataClient(settings)
     try:
         markets, _cursor = await client.get_markets(limit=20)
-        print(f"  Fetched {len(markets)} markets from Kalshi")
+        print(f"  Fetched {len(markets)} markets from Polymarket")
 
         fail_count = 0
         for m in markets[:10]:
@@ -122,7 +122,7 @@ async def main():
     print("\n3. OrderItem schema (bot_manager path):")
     await test_bot_manager_orders()
 
-    print("\n4. Live market scan (Kalshi):")
+    print("\n4. Live market scan (Polymarket):")
     await test_live_market_scan()
 
     print("\n=== All tests passed ===")

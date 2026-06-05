@@ -1,3 +1,50 @@
+export type StockDecisionAction = "buy" | "sell" | "hold" | "blocked";
+
+export interface StockDecisionTrace {
+  ticker: string;
+  timestamp: string;
+  strategy: string;
+  l1_score: number;
+  l2_score: number;
+  l3_score: number;
+  final_score: number;
+  action: StockDecisionAction;
+  risk_approved: boolean;
+  blocked_reason: string | null;
+  explanation: string;
+  weights: Record<string, number>;
+  regime: string | null;
+  llm_sentiment?: string | null;
+  ml_probability_up?: number | null;
+}
+
+export interface RegimeReading {
+  regime: string;
+  confidence: number;
+  score?: number;
+  timestamp?: string;
+  spy_trend?: number;
+  qqq_trend?: number;
+  atr_pct?: number;
+  vix?: number | null;
+  allows_long?: boolean;
+  rationale?: string;
+}
+
+export interface PerformanceSummary {
+  total_trades: number;
+  wins: number;
+  losses: number;
+  total_pnl: number;
+  win_rate: number;
+  average_win: number;
+  average_loss: number;
+  profit_factor: number;
+  max_drawdown: number;
+  sharpe: number;
+  by_strategy: Record<string, { trades: number; pnl: number; wins: number; win_rate?: number }>;
+}
+
 export interface BotStatus {
   running: boolean;
   status: string;

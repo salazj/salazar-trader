@@ -1,615 +1,426 @@
-# $alazar-Trader
+# Salazar-Trader — NVIDIA Jetson Orin Nano AI Stock Bot
 
-A multi-asset trading platform with a **web GUI**, supporting **prediction markets** (Polymarket, Kalshi) and **stocks** (Alpaca). Three intelligence layers — including **dual-LLM market analysis** (GPT-4o + Claude) and **multi-source news ingestion** — a FastAPI control backend, React dashboard, and Docker Compose orchestration.
+> This project targets **NVIDIA Jetson Orin Nano** for local AI-assisted
+> stock/ETF trading using **Alpaca**. It uses deterministic risk
+> controls, technical strategies, optional ML prediction, and a local
+> LLM/NLP sentiment filter. **It does not target Raspberry Pi, Pi AI
+> HAT, or generic low-power hardware.**
 
-**This system does NOT promise profits.** It is designed to minimize mistakes, overtrading, and catastrophic losses through conservative defaults, comprehensive risk controls, and multiple operating modes.
-
-| Asset Class | Exchange / Broker | Config |
-|-------------|------------------|--------|
-| Prediction Markets | Polymarket | `ASSET_CLASS=prediction_markets` `EXCHANGE=polymarket` |
-| Prediction Markets | Kalshi | `ASSET_CLASS=prediction_markets` `EXCHANGE=kalshi` |
-| Equities | Alpaca | `ASSET_CLASS=equities` `BROKER=alpaca` |
+The AI improves trade filtering and decision quality, but it can never
+bypass deterministic risk controls. Profitability comes from disciplined
+strategy, risk management, backtesting, and signal quality — not blind
+LLM guessing.
 
 ---
 
-## Quick Start
+## What it is
 
-### Prerequisites
+A FastAPI + React stock trading bot designed to run **end-to-end on a
+single Jetson Orin Nano Super Developer Kit**:
 
-- Docker 20.10+
-- Docker Compose v2+
+* **Broker** — Alpaca (paper and live)
+* **Asset class** — stocks and ETFs (highly liquid tickers only)
+* **Decision engine** — three layers, deterministic risk-gated
+  * **L1**: technical strategies (momentum, mean reversion, breakout,
+    pullback, news-gated)
+  * **L2**: tabular ML (sklearn baseline; auto-uses XGBoost/LightGBM
+    if installed)
+  * **L3**: local LLM via `llama.cpp` (CUDA on Jetson) or Ollama —
+    sentiment + risk veto only
+* **Risk manager** — 14 deterministic checks; the LLM cannot override
+* **Backtester** — single-strategy and chronological walk-forward
+* **Frontend** — React dashboard (mode, scores, regime, decisions,
+  PnL, blocked trades, emergency stop with confirm)
 
-### 1. Get the config files
+---
+
+## Default ticker universe
+
+```
+SPY  QQQ  AAPL  MSFT  NVDA  TSLA  AMD  META  AMZN  GOOGL
+```
+
+The risk manager rejects any ticker outside `APPROVED_STOCK_TICKERS`.
+
+---
+
+## Beginner-safe defaults
+
+Tuned for paper trading on a small account:
+
+| Limit                      | Default |
+|----------------------------|--------:|
+| Max position notional      | **$50** |
+| Max portfolio exposure     | **$250**|
+| Max daily loss             | **$25** |
+| Max open positions         | **3**   |
+| Max trades / day           | **5**   |
+| Max orders / minute        | **3**   |
+| Stop loss required         | **yes** |
+| Extended-hours trading     | **no**  |
+
+Three live-trading gates must all be flipped before any real order:
+
+```
+DRY_RUN=false
+ENABLE_LIVE_TRADING=true
+LIVE_TRADING_ACKNOWLEDGED=true
+```
+
+Plus valid Alpaca credentials. See `docs/RISK_CONTROLS.md`.
+
+---
+
+## Quick start (Jetson Orin Nano)
 
 ```bash
 git clone https://github.com/salazj/salazar-trader.git
 cd salazar-trader
 cp .env.example .env
+# edit .env: add ALPACA_API_KEY / ALPACA_SECRET_KEY
+
+./start.sh            # interactive menu: Containerized or Native (see below)
 ```
 
-Edit `.env` with your API keys. At minimum, set credentials for one exchange/broker:
+`./start.sh` is the single entry point and offers two install paths — both
+ship the **React web dashboard**:
 
-**For Kalshi:**
-```
-ASSET_CLASS=prediction_markets
-EXCHANGE=kalshi
-KALSHI_API_KEY=your-key-id
-KALSHI_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----
-```
+| Path             | What runs                                              | GUI URL                  |
+|------------------|--------------------------------------------------------|--------------------------|
+| **Containerized**| Docker compose: `ollama` + backend + frontend (nginx)  | `http://<ip>:3000`       |
+| **Native**       | Python venv + systemd service running the API+GUI server | `http://<ip>:8000`     |
 
-**For Polymarket:**
-```
-ASSET_CLASS=prediction_markets
-EXCHANGE=polymarket
-PRIVATE_KEY=0x...
-POLY_API_KEY=...
-POLY_API_SECRET=...
-POLY_PASSPHRASE=...
-```
+In both paths, **trading is started from the dashboard** (the server does not
+autostart trading). Stop everything with `./stop.sh`.
 
-**For Stocks (Alpaca):**
-```
-ASSET_CLASS=equities
-BROKER=alpaca
-ALPACA_API_KEY=your-key
-ALPACA_SECRET_KEY=your-secret
-ALPACA_PAPER=true
-```
+`start.sh` is **idempotent**: once installed, running `./start.sh` again
+detects the existing install and simply starts it (it won't reinstall or
+rebuild). `./stop.sh` likewise detects whether the container stack or the
+native service is running and stops the right one.
 
-### 2. Build and launch
+The dashboard shows:
+
+* Current mode (dry-run / paper / live), broker, account equity, buying power
+* Active strategy, active tickers, open positions, daily PnL, win rate
+* Current market regime (trending / range-bound / risk-off / etc.)
+* Latest decisions with **L1 / L2 / L3** scores, LLM sentiment, blocked reasons
+* Risk status, circuit-breaker state, emergency-stop button (confirm-required)
+
+---
+
+## Running 24/7 (native systemd)
+
+`./start.sh native` sets this up for you (venv + systemd unit). The service
+runs the **API + GUI server** (`python -m app.api`) and auto-starts on boot /
+auto-restarts on crash. Trading itself is started from the dashboard, so after
+a reboot open `http://<ip>:8000` and press **Start**.
+
+To do it manually (or to understand what `start.sh native` does):
 
 ```bash
-./start.sh
+# 1. Verify Alpaca connectivity first
+.venv/bin/python scripts/diagnose_alpaca.py
+
+# 2. Make sure Ollama is running as a service (for the local LLM)
+sudo systemctl enable --now ollama
+
+# 3. Install the service (edit User / paths in the file if yours differ)
+sudo cp deploy/salazar-trader.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now salazar-trader
+
+# 4. Install log rotation (keeps 14 compressed days)
+sudo cp deploy/salazar-trader.logrotate /etc/logrotate.d/salazar-trader
 ```
 
-This builds the backend and frontend images from source, starts both containers, and tails the backend logs live. Press `Ctrl+C` to detach from the logs (containers keep running).
+Service control:
 
-| Container | Port | Description |
-|-----------|------|-------------|
-| `salazar-backend` | 8000 | FastAPI server + BotManager |
-| `salazar-frontend` | **3000** | React GUI (nginx reverse proxy) |
+| Task                       | Command                                   |
+|----------------------------|-------------------------------------------|
+| Status                     | `sudo systemctl status salazar-trader`    |
+| Start / Stop               | `sudo systemctl start\|stop salazar-trader` |
+| Restart (after `git pull`) | `sudo systemctl restart salazar-trader`   |
+| Disable auto-start         | `sudo systemctl disable salazar-trader`   |
 
-### 3. Open the GUI
-
-Open **http://localhost:3000** in your browser.
-
-From the GUI you can:
-- Select a mode (Polymarket, Kalshi, or Stocks)
-- Configure strategies, risk limits, NLP, and decision engine weights
-- Start and stop the bot
-- Watch live logs stream in real time
-- Monitor positions, orders, P&L, and risk state
-- Save and load configuration presets
-- Trigger emergency stop
-
-**The bot starts in dry-run mode by default. No real orders are placed until you explicitly enable live trading through the GUI safety gates.**
-
-### 4. Stop
+Updating to the latest code:
 
 ```bash
-./stop.sh
-```
-
-Stops the containers but keeps them. Run `./start.sh` to restart.
-
-### 5. Remove containers
-
-```bash
-./remove.sh
-```
-
-Stops and removes containers, networks, and volumes. Optionally removes the built images too. Run `./start.sh` to rebuild from source.
-
-### 6. Update after code changes
-
-```bash
+cd ~/salazar-trader
 git pull
-./start.sh       # rebuilds from latest source
+.venv/bin/pip install -e . --upgrade   # only if pyproject.toml changed
+sudo systemctl restart salazar-trader
 ```
 
 ---
 
-## How It Works
+## Viewing logs
 
-```
-Browser (Desktop / Mobile)
-    │
-    ▼
-nginx (frontend:3000)
-    ├── /* → React static files
-    ├── /api/* → proxy to backend:8000
-    └── /ws/* → proxy to backend:8000 (WebSocket)
-
-FastAPI Backend (backend:8000)
-    ├── BotManager → TradingBot (async task)
-    │       ├── Exchange Adapters (Polymarket, Kalshi)
-    │       ├── Broker Adapters (Alpaca)
-    │       ├── News Ingestion (NewsAPI, RSS, Google News, Finnhub)
-    │       └── Dual-LLM Market Analyzer (GPT-4o + Claude)
-    ├── REST API (status, config, portfolio, risk, logs)
-    ├── WebSocket (live logs, live status, live portfolio)
-    └── SQLite Repository
-```
-
-The GUI communicates **exclusively** through the control API. It never touches bot internals directly. All bot state is accessed through the `BotManager`, which encapsulates the trading bot lifecycle.
-
-See [docs/API_REFERENCE.md](docs/API_REFERENCE.md) for the full API specification.
-
----
-
-## Web GUI Pages
-
-| Page | Path | What it does |
-|------|------|-------------|
-| Dashboard | `/` | Bot status, P&L, exposure, risk, positions, orders |
-| Configuration | `/config` | Select mode, configure strategies/NLP/risk, start bot |
-| Live Logs | `/logs` | Real-time log stream, filter, search, export |
-| Portfolio | `/portfolio` | Positions, orders, fills, P&L history chart |
-| Risk Controls | `/risk` | Circuit breaker, emergency stop, daily loss tracking |
-
-See [docs/GUI_GUIDE.md](docs/GUI_GUIDE.md) for a detailed page-by-page walkthrough.
-
----
-
-## Safety Design
-
-- **DRY_RUN=true** by default everywhere — Docker image, compose, code, and GUI
-- Live trading requires **three explicit gates** to be opened:
-  1. `DRY_RUN=false`
-  2. `ENABLE_LIVE_TRADING=true`
-  3. `LIVE_TRADING_ACKNOWLEDGED=true`
-- The GUI shows a **red warning banner** on every page when live trading is active
-- The GUI requires explicit toggle switches and confirmation before enabling live mode
-- The backend validates credentials before allowing a live start
-- Risk controls are always enforced and cannot be bypassed by AI layers
-- No secrets are baked into the Docker image
-- The LLMs produce **structured signals only** — they never place trades directly
-
----
-
-## Intelligence Layers
-
-| Layer | Type | Description |
-|-------|------|-------------|
-| **Level 1** | Rule-based | Deterministic strategies (market maker, momentum, prediction value, sentiment) |
-| **Level 2** | ML | Tabular classifiers (logistic regression, gradient boosting, random forest) |
-| **Level 3** | NLP/AI | Multi-source news ingestion, LLM news classification, dual-LLM market analysis |
-
-All layers produce `NormalizedSignal` objects that the ensemble evaluates with configurable weights, conflict detection, and veto logic. Every decision is fully traceable.
-
-### L1 Strategies
-
-| Strategy | Description |
-|----------|-------------|
-| `prediction_value` | Detects mean-reversion and momentum edge in the $0.20–$0.80 price range with volume filters |
-| `passive_market_maker` | Places limit orders around the mid-price to capture the bid-ask spread |
-| `momentum_scalper` | Detects short-term price momentum from orderbook imbalance |
-| `event_probability_model` | ML-powered event probability estimation (L2) |
-| `sentiment_adapter` | Translates NLP sentiment signals into trading signals |
-
-### L3: News Ingestion
-
-The bot pulls news from **multiple sources simultaneously** and uses them for both keyword-based NLP classification and LLM-powered analysis:
-
-| Provider | Source | API Key Required |
-|----------|--------|-----------------|
-| `newsapi` | [NewsAPI.org](https://newsapi.org) — 80k+ sources | Yes (`NEWSAPI_KEY`) |
-| `rss` | RSS/Atom feeds (Reuters, BBC, NPR, NYT, CNBC) | No |
-| `google_news` | Google News RSS — multi-topic search | No |
-| `finnhub` | [Finnhub.io](https://finnhub.io) — financial news | Yes (`FINNHUB_API_KEY`) |
-| `mock` | Synthetic headlines for testing | No |
-| `file` | Local text files from `data/news/` | No |
-
-Configure active providers via comma-separated list:
-```bash
-NLP_PROVIDERS=newsapi,rss,google_news,finnhub
-```
-
-### L3: Dual-LLM Market Analysis (GPT-4o + Claude)
-
-The bot runs two LLMs in parallel to evaluate prediction market mispricing:
-
-```
-Active Markets + News Headlines
-        │
-        ├──→ GPT-4o Analyzer ──→ ┐
-        │                        ├──→ Compare confidence ──→ Pick winner per market
-        └──→ Claude Analyzer ──→ ┘
-```
-
-Both models receive the same market question, current price, and relevant news. They estimate the true probability, identify edge, and return a direction (buy_yes / buy_no / hold). **Whichever model returns higher confidence wins** for each market.
-
-The system works with one or both LLMs. If only GPT-4o is configured, it runs solo. If both are configured, they compete every cycle (180 seconds).
-
----
-
-## NLP & LLM Configuration
-
-Set in `.env`:
+The service writes everything to `/var/log/salazar-trader.log`. The
+`scripts/logs.sh` helper wraps `journalctl`/`tail` with simple commands:
 
 ```bash
-# --- News providers (comma-separated) ---
-NLP_PROVIDERS=newsapi,rss,google_news,finnhub
-NEWSAPI_KEY=your-newsapi-key
-RSS_FEED_URLS=https://feeds.reuters.com/reuters/topNews,https://feeds.bbci.co.uk/news/rss.xml
-FINNHUB_API_KEY=your-finnhub-key
-
-# --- GPT-4o (primary LLM) ---
-LLM_PROVIDER=hosted_api
-LLM_MODEL_NAME=gpt-4o
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=sk-your-openai-key
-
-# --- Claude (second LLM, competitive mode) ---
-CLAUDE_API_KEY=sk-ant-your-anthropic-key
-CLAUDE_MODEL_NAME=claude-sonnet-4-6
+./scripts/logs.sh            # live tail (the everyday one)
+./scripts/logs.sh tail 500   # last 500 lines, no follow
+./scripts/logs.sh errors     # only warnings/errors (live)
+./scripts/logs.sh trades     # only orders/decisions/fills (live)
+./scripts/logs.sh news       # only news + LLM + universe activity (live)
+./scripts/logs.sh today      # everything logged today
+./scripts/logs.sh status     # systemd service status
+./scripts/logs.sh help       # full command list
 ```
 
-All LLMs are optional. The bot works fully with keyword-only classification (`LLM_PROVIDER=none`). Claude is optional and activates automatically when `CLAUDE_API_KEY` is set.
-
-### Ensemble Decision Engine
-
-The decision engine combines signals from all three layers with configurable behavior:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `DECISION_MODE` | `balanced` | `conservative`, `balanced`, or `aggressive` |
-| `MIN_ENSEMBLE_CONFIDENCE` | `0.30` | Minimum confidence to execute a trade |
-| `MIN_LAYERS_AGREE` | `2` | Number of layers that must agree on direction |
-| `MIN_EVIDENCE_SIGNALS` | `2` | Minimum raw signals required |
-
----
-
-## Docker Compose Services
-
-| Service | Command | Profile | Purpose |
-|---------|---------|---------|---------|
-| `backend` | `api` | *(default)* | FastAPI server + BotManager, port 8000 |
-| `frontend` | — | *(default)* | React GUI via nginx, port 3000 |
-| `bot` | `bot` | `standalone` | CLI-only bot without API/GUI |
-| `backtest` | `backtest` | `tools` | One-shot strategy backtesting |
-| `train` | `train` | `tools` | One-shot ML model training |
-
----
-
-## Convenience Scripts
-
-Three scripts in the repo root handle the full container lifecycle:
-
-| Script | What it does |
-|--------|-------------|
-| `./start.sh` | Build from source, start backend + frontend, tail backend logs |
-| `./stop.sh` | Stop and remove containers |
-| `./remove.sh` | Full teardown: containers, volumes, optionally images |
+Optional shortcut from anywhere:
 
 ```bash
-./start.sh       # build + run + show logs (Ctrl+C to detach)
-./stop.sh        # stop
-./start.sh       # rebuild and restart
-./remove.sh      # full cleanup
+echo "alias strader-logs='cd ~/salazar-trader && ./scripts/logs.sh'" >> ~/.bashrc
+source ~/.bashrc
+# then: strader-logs   (or  strader-logs trades)
 ```
 
 ---
 
-## Building from Source (Docker Compose)
+## Install paths (`start.sh`)
 
-If you want to build the images yourself (e.g. you've modified the code or want to use your own `.env`), use the Docker Compose build override:
-
-### 1. Clone and configure
+`./start.sh` with no arguments is **smart**: if Salazar Trader is already
+installed it just starts it; otherwise it shows the install menu. You can also
+run it non-interactively:
 
 ```bash
-git clone https://github.com/salazj/salazar-trader.git
-cd salazar-trader
-cp .env.example .env
-# Edit .env with your API keys
+./start.sh                   # detect existing install and start it (or show menu)
+./start.sh install           # always show the install menu
+
+./start.sh docker            # containerized; build/pull only if images are missing
+./start.sh docker --pull     # containerized, force pull prebuilt images from GHCR
+./start.sh docker --build    # containerized, force build images from local source
+
+./start.sh native            # native; (re)install only if needed, then start
+./start.sh native --reinstall# native, force venv reinstall + systemd unit refresh
+
+./stop.sh                    # stop whichever path is running (container or native)
 ```
 
-### 2. Build images from source
+How the smart start decides what to do:
+
+| Situation                         | `./start.sh` (no args) does…                     |
+|-----------------------------------|--------------------------------------------------|
+| Nothing installed                 | shows the install menu                           |
+| Native install present            | starts the systemd service (no reinstall)        |
+| Container images/containers present | `docker compose up -d` (no rebuild/pull)       |
+| Both present                      | asks which one to start                          |
+
+### Headless mode (`--headless`)
+
+By default the API + GUI come up and **you press Start in the dashboard** to
+begin trading. Add `--headless` to autostart trading automatically — useful for
+24/7 unattended operation. The GUI stays available for monitoring and stopping.
 
 ```bash
-# Build both backend and frontend from local source
-docker compose -f docker-compose.yml -f docker-compose.build.yml build
+./start.sh --headless           # detect install + autostart trading
+./start.sh native --headless    # native: autostart trading on every boot
+./start.sh docker --headless    # containerized: autostart trading on container start
 ```
 
-This uses the root `Dockerfile` for the backend and `frontend/Dockerfile` for the frontend. Your local code is baked into the images.
+`--headless` sets `HEADLESS_AUTOSTART=1` for the backend (baked into the systemd
+unit for native, passed to the backend container for docker), so trading also
+resumes automatically after a reboot or container restart. The bot starts with
+the exact config from your `.env` (asset class, stock universe, risk limits).
 
-### 3. Start
+To turn autostart back off, re-run without the flag: `./start.sh native --reinstall`
+(native) or `./start.sh docker` (containerized).
+
+### Containerized (Docker)
+
+Runs three services via `docker compose`: a swappable **`ollama`** LLM
+container, the **backend** (FastAPI on :8000), and the **frontend** (React via
+nginx on :3000). The frontend proxies API/WS calls to the backend, and the
+backend's LLM endpoints are pointed at the `ollama` container automatically
+(overriding the `127.0.0.1` values in `.env`).
+
+* **Pull prebuilt (GHCR):** fastest — uses `ghcr.io/salazj/salazar-trader` and
+  `…-frontend`. (ARM64 images, see *Publishing* below.)
+* **Build from source:** uses the local `Dockerfile` / `frontend/Dockerfile`
+  via `docker-compose.build.yml`.
+
+**Swapping the LLM model** (containerized): set `OLLAMA_MODEL` in `.env` (e.g.
+`OLLAMA_MODEL=llama3.1`) and re-run `./start.sh docker`. The one-shot
+`ollama-pull` service fetches the new model into the `ollama-models` volume and
+the backend uses it. GPU is opt-in: `start.sh` auto-applies
+`docker-compose.gpu.yml` (which sets `runtime: nvidia`) only when the NVIDIA
+container runtime is registered with Docker; otherwise the `ollama` container
+runs on CPU.
+
+### Native (systemd)
+
+For Node-free hosts: the repo ships a **pre-built GUI bundle** in
+`app/api/static/`, so the FastAPI server serves both the API and the dashboard
+on :8000 — no nginx, no Node. `./start.sh native` creates a `.venv`,
+`pip install -e .`, renders a systemd unit for the current path/user, and
+enables it. Trading is started from the dashboard; after a reboot, open the
+dashboard and press **Start**.
+
+`start.sh native` also **ensures the host Ollama is running and the configured
+model is pulled** before starting the service: it starts the `ollama` systemd
+service if needed and runs `ollama pull` for the model (resolved from
+`OLLAMA_MODEL`, else `LOCAL_LLM_MODEL_NAME`/`LLM_MODEL_NAME` in `.env`, default
+`phi3`). To swap the native model, change that value in `.env` and re-run
+`./start.sh native`. If Ollama isn't installed, the L3 LLM is skipped (the bot
+falls back to keyword classification).
+
+> Rebuilding the GUI bundle: when the frontend changes, rebuild and re-commit
+> the bundle on a machine with Node:
+> `cd frontend && npm install && npm run build && rm -rf ../app/api/static && cp -R dist/. ../app/api/static/`.
+
+---
+
+## Publishing images (ARM64 → GHCR)
+
+`scripts/publish_images.sh` builds and pushes the backend and frontend images
+for `linux/arm64` (Jetson / Apple Silicon target). You need a GitHub token with
+`write:packages`:
 
 ```bash
-# Build and start in one command
-docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d
+export GHCR_USER=salazj
+export GHCR_TOKEN=ghp_xxxxxxxx          # write:packages scope
+./scripts/publish_images.sh             # builds + pushes :latest
+TAG=v3.0.0 ./scripts/publish_images.sh  # tagged release
 ```
 
-### 4. View logs
+After publishing, any host can `./start.sh docker` (pull path) to run the
+latest images without building locally.
 
-```bash
-# Follow backend logs live
-docker compose logs -f backend
+---
 
-# Last 100 lines
-docker compose logs backend --tail 100
+## Architecture
+
+```
+                    ┌─────────────────────────────────────────────┐
+                    │              FastAPI + BotManager           │
+                    │  /api/{status,health,config,bot,portfolio,  │
+                    │       risk,decisions,llm,regime,backtests,  │
+                    │       performance}                          │
+                    └────────────────┬────────────────────────────┘
+                                     │
+                    ┌────────────────┴────────────────────────────┐
+                    │                TradingBot                   │
+                    │                                             │
+                    │   features ─►  L1 strategies (momentum,…)   │
+                    │                                             │
+                    │             +  L2 StockMLPredictor          │
+                    │                                             │
+                    │             +  L3 LocalLLMService           │
+                    │                                             │
+                    │   regime ─►   StockDecisionEngine ─► trace  │
+                    │                                             │
+                    │                StockRiskManager (gate)      │
+                    │                                             │
+                    │                StockExecutionEngine ─► Alpaca│
+                    └─────────────────────────────────────────────┘
 ```
 
-### 5. Stop / Rebuild
+* `app/llm/` — local LLM provider, strict JSON schema, TTL cache,
+  fail-safe defaults.
+* `app/regime/` — market regime classifier (SPY/QQQ trend, ATR, VIX).
+* `app/stocks/` — features, strategies, risk, decision, ML, backtester.
+* `app/brokers/alpaca/` — Alpaca adapter (market data, execution,
+  streaming, market hours).
 
-```bash
-# Stop and remove containers
-docker compose down
+---
 
-# Full teardown (containers + images + volumes)
-docker compose down --rmi all --volumes --remove-orphans
+## API endpoints
 
-# Rebuild from source after code changes
-docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d
 ```
+GET    /api/health
+GET    /api/status
+GET    /api/config
+POST   /api/config/validate
+POST   /api/bot/start
+POST   /api/bot/stop
 
-### Build individual services
+GET    /api/portfolio
+GET    /api/portfolio/positions
+GET    /api/portfolio/orders
+GET    /api/portfolio/fills
 
-```bash
-# Build only backend
-docker compose -f docker-compose.yml -f docker-compose.build.yml build backend
+GET    /api/risk/status
+POST   /api/risk/emergency-stop      # body: {"confirm": true}
+POST   /api/risk/reset-circuit-breaker
 
-# Build only frontend
-docker compose -f docker-compose.yml -f docker-compose.build.yml build frontend
-```
+GET    /api/decisions/recent
+GET    /api/regime/current
+GET    /api/performance/summary
 
-### Check container status
+GET    /api/llm/status
+POST   /api/llm/test                 # quick prompt round-trip
 
-```bash
-docker compose ps
+GET    /api/backtests
+POST   /api/backtests/run
 ```
 
 ---
 
-## Alternative: Standalone Bot (No GUI)
-
-If you prefer CLI-only operation without the web GUI:
+## Backtesting
 
 ```bash
-# Build from source and run the standalone bot profile
-docker compose -f docker-compose.yml -f docker-compose.build.yml --profile standalone up --build bot
+# Single strategy run
+python scripts/backtest_stock_strategy.py \
+  --strategy stock_momentum \
+  --tickers SPY,QQQ,NVDA \
+  --start 2024-01-01 --end 2024-12-31
+
+# Walk-forward validation
+python scripts/backtest_stock_strategy.py \
+  --strategy stock_pullback \
+  --tickers SPY,QQQ \
+  --walk-forward --train-size 1500 --test-size 250
 ```
 
-This runs the bot directly without the API server or web GUI.
+See `docs/BACKTESTING.md` for the data format and walk-forward details.
 
 ---
 
-## Alternative: Local Development (No Docker)
+## Tests
 
 ```bash
-# Backend
-python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
-
-# Start the API server
-python -m app.api
-
-# In another terminal — start the frontend dev server
-cd frontend
-npm install
-npm run dev
-
-# Open http://localhost:3000
+pytest -q
 ```
 
----
-
-## Risk Controls
-
-Default limits (configurable via GUI or `.env`):
-
-**Prediction Markets:**
-- Max position per market: 5 contracts
-- Max total exposure: $50
-- Max daily loss: $10 (circuit breaker)
-- Max 3 orders per minute
-- Tradeable price range: $0.20–$0.80 (enforced on all strategies)
-- Minimum 24h volume: 50 contracts
-- Per-instrument cooldown: 5 minutes (market maker)
-
-**Stocks:**
-- Max position: $1,000
-- Max portfolio: $10,000
-- Max daily loss: $500
-- Max 10 open positions
-- Market hours enforcement
-
-See [docs/RISK_CONTROLS.md](docs/RISK_CONTROLS.md) for complete documentation.
-
----
-
-## Toolbox Commands
-
-```bash
-# Backtest a strategy
-docker compose run --rm --profile tools backtest --strategy momentum_scalper
-
-# Train ML model
-docker compose run --rm --profile tools train --synthetic
-
-# Run tests locally
-pytest -v --tb=short
-```
-
----
-
-## Cloud / VM Deployment
-
-```bash
-# Install Docker on your VM
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER && newgrp docker
-
-# Clone and configure
-git clone https://github.com/salazj/salazar-trader.git
-cd salazar-trader
-cp .env.example .env
-nano .env  # set your credentials
-
-# Build from source and launch
-./start.sh
-
-# Access the GUI at http://<your-vm-ip>:3000
-```
-
-Works on any architecture (Intel, AMD, ARM, Apple Silicon VMs). The GUI is responsive and works on phone browsers. For HTTPS, put a reverse proxy (Caddy, nginx) in front of port 3000.
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instructions.
-
----
-
-## Persistent Volumes
-
-| Path | Purpose |
-|------|---------|
-| `./data` | Market data, news files, presets, recorded sessions |
-| `./logs` | Structured logs |
-| `./model_artifacts` | Trained ML models |
-| `./reports` | PnL reports, training reports |
-
-These are mounted from the host. Data persists across container restarts.
-
----
-
-## Project Structure
-
-```
-├── app/
-│   ├── api/            FastAPI backend, BotManager, WebSocket endpoints
-│   ├── config/         Settings, env loading, validation
-│   ├── exchanges/      Exchange adapters (Polymarket, Kalshi)
-│   ├── brokers/        Broker adapters (Alpaca)
-│   ├── stocks/         Stock-specific strategies, features, risk, execution
-│   ├── data/           Orderbook, features, domain models
-│   ├── strategies/     L1 strategies (market maker, momentum, prediction value, sentiment)
-│   ├── research/       ML training pipeline (L2)
-│   ├── nlp/
-│   │   ├── providers/  News sources (NewsAPI, RSS, Google News, Finnhub, mock, file)
-│   │   ├── pipeline.py NLP text-to-signal pipeline with hybrid classification
-│   │   └── market_analyzer.py  Dual-LLM market analysis (GPT-4o + Claude)
-│   ├── news/           News ingestion service, models
-│   ├── decision/       Ensemble decision engine, signal registry, traces
-│   ├── execution/      Exchange-agnostic order management
-│   ├── risk/           Risk checks, circuit breaker
-│   ├── portfolio/      Position tracking, PnL
-│   ├── universe/       Dynamic market selection and filtering
-│   ├── storage/        SQLite repository
-│   ├── backtesting/    Offline strategy evaluation
-│   ├── replay/         Session playback
-│   ├── monitoring/     Structured logging, health endpoint, metrics
-│   └── main.py         Bot orchestrator (intelligence loop, LLM loop, housekeeping)
-├── frontend/           React + Vite + Tailwind web GUI
-│   ├── src/
-│   │   ├── pages/      Dashboard, Config, Logs, Portfolio, Risk
-│   │   ├── components/ UI components (sidebar, toast, status badge)
-│   │   ├── hooks/      WebSocket hooks for live data
-│   │   └── api/        API client and TypeScript types
-│   ├── Dockerfile      Multi-stage Node → nginx build
-│   └── nginx.conf      Reverse proxy config
-├── start.sh                 Build from source + start containers + tail logs
-├── stop.sh                  Stop and remove containers
-├── remove.sh                Full teardown (containers + volumes + images)
-├── docker-compose.yml       Compose orchestration (pull from registry)
-├── docker-compose.build.yml Compose override to build from source
-├── Dockerfile               Backend image
-├── docker/                  Entrypoint script
-├── tests/                   Comprehensive test suite
-└── docs/                    Architecture, API, GUI, deployment guides
-```
-
----
-
-## Environment Variables Reference
-
-### Exchange / Broker Credentials
-
-| Variable | Description |
-|----------|-------------|
-| `ASSET_CLASS` | `prediction_markets` or `equities` |
-| `EXCHANGE` | `polymarket` or `kalshi` |
-| `BROKER` | `alpaca` |
-| `KALSHI_API_KEY` | Kalshi API key ID |
-| `KALSHI_PRIVATE_KEY` | Kalshi RSA private key (newlines as `\n`) |
-| `ALPACA_API_KEY` | Alpaca API key |
-| `ALPACA_SECRET_KEY` | Alpaca secret key |
-| `ALPACA_PAPER` | `true` for paper trading |
-
-### News & NLP
-
-| Variable | Description |
-|----------|-------------|
-| `NLP_PROVIDERS` | Comma-separated provider list (e.g., `newsapi,rss,google_news,finnhub`) |
-| `NEWSAPI_KEY` | API key for [NewsAPI.org](https://newsapi.org) |
-| `RSS_FEED_URLS` | Comma-separated RSS/Atom feed URLs |
-| `FINNHUB_API_KEY` | API key for [Finnhub.io](https://finnhub.io) |
-| `NEWS_POLL_INTERVAL` | Seconds between news fetches (default: 300) |
-
-### LLM / AI
-
-| Variable | Description |
-|----------|-------------|
-| `LLM_PROVIDER` | `none`, `local_open_source`, or `hosted_api` |
-| `LLM_MODEL_NAME` | OpenAI model (e.g., `gpt-4o`) |
-| `LLM_BASE_URL` | OpenAI-compatible API base URL |
-| `LLM_API_KEY` | OpenAI API key |
-| `CLAUDE_API_KEY` | Anthropic API key (enables Claude as second LLM) |
-| `CLAUDE_MODEL_NAME` | Claude model (default: `claude-sonnet-4-6`) |
-| `LLM_TIMEOUT_SECONDS` | API call timeout (default: 30) |
-| `LLM_CONFIDENCE_THRESHOLD` | Min confidence for hybrid classifier (default: 0.5) |
-
-### Trading Safety
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DRY_RUN` | `true` | Simulate trades without real orders |
-| `ENABLE_LIVE_TRADING` | `false` | Second safety gate for live trading |
-| `LIVE_TRADING_ACKNOWLEDGED` | `false` | Third safety gate — explicit acknowledgment |
-
-### Decision Engine
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DECISION_MODE` | `balanced` | `conservative`, `balanced`, or `aggressive` |
-| `MIN_ENSEMBLE_CONFIDENCE` | `0.30` | Minimum confidence to trade |
-| `MIN_LAYERS_AGREE` | `2` | Required agreeing layers |
-| `MIN_EVIDENCE_SIGNALS` | `2` | Minimum raw signals |
-
----
-
-## Running Tests
-
-```bash
-# All tests
-pytest -v --tb=short
-
-# API workflow tests only
-pytest tests/test_api_workflow.py -v
-
-# Safety gate tests
-pytest tests/test_live_safety.py -v
-
-# Stock component tests
-pytest tests/test_stock_strategies.py tests/test_stock_risk.py -v
-```
+The Jetson-specific suites: `test_stock_*`, `test_llm_*`, `test_regime`,
+`test_decision_engine_stock`, `test_walk_forward`. Other suites cover
+the legacy multi-asset components which remain in the repo for
+backwards compatibility.
 
 ---
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Platform architecture and module responsibilities |
-| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | Complete API endpoint reference |
-| [docs/GUI_GUIDE.md](docs/GUI_GUIDE.md) | Web GUI page-by-page walkthrough |
-| [docs/STOCK_TRADING.md](docs/STOCK_TRADING.md) | Stock trading setup with Alpaca |
-| [docs/RISK_CONTROLS.md](docs/RISK_CONTROLS.md) | Risk control documentation |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Local and cloud deployment guide |
-| [docs/EXCHANGES.md](docs/EXCHANGES.md) | Exchange/broker setup details |
+| File                              | Topic                                          |
+|-----------------------------------|------------------------------------------------|
+| `docs/JETSON_DEPLOYMENT.md`       | Hardware, setup, performance modes             |
+| `docs/STOCK_TRADING.md`           | Alpaca + strategies + decision engine          |
+| `docs/LOCAL_LLM.md`               | Local LLM, JSON schema, providers              |
+| `docs/BACKTESTING.md`             | Backtester + walk-forward CLI                  |
+| `docs/RISK_CONTROLS.md`           | Every deterministic gate, kill-switch          |
+| `docs/API_REFERENCE.md`           | Full REST API surface                          |
+| `docs/GUI_GUIDE.md`               | Dashboard walkthrough                          |
+
+### Helper scripts
+
+| Script                              | Purpose                                       |
+|-------------------------------------|-----------------------------------------------|
+| `start.sh` / `stop.sh`              | Unified launcher (containerized or native)    |
+| `scripts/setup_jetson.sh`           | One-shot Jetson setup (deps, venv, Ollama)    |
+| `scripts/diagnose_alpaca.py`        | Smoke-test Alpaca credentials + connectivity  |
+| `scripts/logs.sh`                   | Friendly log viewer (live/errors/trades/news) |
+| `scripts/publish_images.sh`         | Build + push ARM64 images to GHCR             |
+| `scripts/backtest_stock_strategy.py`| Single-strategy + walk-forward backtests      |
+| `deploy/salazar-trader.service`     | systemd unit for 24/7 operation               |
+| `deploy/salazar-trader.logrotate`   | Log rotation (14 compressed days)             |
 
 ---
 
 ## Disclaimer
 
-This software is for educational and research purposes only. Trading prediction markets and stocks involves risk of loss. This system does not guarantee profits and is not financial advice. Use at your own risk.
+This software is for educational and research purposes only. Trading
+stocks involves risk of loss. The system **does not guarantee profits**
+and **is not financial advice**. Use at your own risk.

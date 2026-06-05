@@ -53,7 +53,6 @@ class OrderStatus(str, Enum):
 
 class Exchange(str, Enum):
     POLYMARKET = "polymarket"
-    KALSHI = "kalshi"
 
 
 class TradingMode(str, Enum):

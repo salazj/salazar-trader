@@ -12,14 +12,18 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
 
 import click
+
+if TYPE_CHECKING:
+    from app.stocks.models import StockBar
 
 from app.config.settings import Settings, get_settings
 from app.data.features import FeatureEngine
 from app.data.models import Market, MarketFeatures, Order, Side, Signal, SignalAction, Trade, TradingMode
-from app.utils.helpers import generate_order_id
+from app.utils.helpers import generate_order_id, utc_now
 from app.data.orderbook import OrderbookManager
 from app.decision.engine import DecisionEngine, signal_to_normalized
 from app.decision.ensemble import DecisionMode, EnsembleConfig
@@ -52,6 +56,25 @@ from app.strategies.base import BaseStrategy, StrategyRegistry, _import_all_stra
 logger = get_logger(__name__)
 
 
+def _block_category(reason: str) -> str:
+    """Bucket a decision-engine block reason into a stable, low-cardinality tag
+    so the per-scan heartbeat stays readable instead of logging a unique string
+    (with embedded scores) per symbol."""
+    r = reason.lower()
+    if r.startswith("final_score") or "below threshold" in r:
+        return "below_threshold"
+    if r.startswith("risk"):
+        detail = reason.split(":", 1)[1].strip() if ":" in reason else ""
+        return f"risk:{detail.split()[0]}" if detail else "risk"
+    if "llm gated" in r:
+        return "llm_gate"
+    if "regime" in r:
+        return "regime_block"
+    if "no l1" in r:
+        return "no_l1_signal"
+    return reason.split(":", 1)[0].strip()[:24] or "blocked"
+
+
 class TradingBot:
     """
     Main orchestrator. Manages the lifecycle of all components and runs
@@ -81,6 +104,7 @@ class TradingBot:
         self._news_service = NewsIngestionService(
             pipeline=self._nlp_pipeline,
             poll_interval=float(self._settings.news_poll_interval),
+            max_classify_per_cycle=int(self._settings.news_max_classify_per_cycle),
         )
         self._setup_nlp_providers()
 
@@ -91,7 +115,7 @@ class TradingBot:
 
     def _init_prediction_markets(self) -> None:
         """Set up all prediction-market-specific components."""
-        # Exchange adapter (Polymarket or Kalshi)
+        # Exchange adapter (Polymarket)
         self._adapter: BaseExchangeAdapter = build_exchange_adapter(self._settings)
 
         self._risk_manager = RiskManager(self._settings)
@@ -207,7 +231,7 @@ class TradingBot:
         self._llm_interval_seconds: float = float(self._settings.llm_analysis_interval)
         self._claude_interval_seconds: float = float(self._settings.claude_analysis_interval)
         self._provider_enabled: dict[str, bool] = {}
-        self._kalshi_balance: float = 0.0
+        self._exchange_balance: float = 0.0
         self._init_service_registry()
 
     def _init_service_registry(self) -> None:
@@ -227,16 +251,17 @@ class TradingBot:
         """Return current stats for all services."""
         services: list[dict] = []
 
+        exchange_name = (self._settings.exchange or "polymarket").lower()
         services.append({
-            "name": "kalshi",
-            "label": "Kalshi",
+            "name": exchange_name,
+            "label": exchange_name.capitalize(),
             "type": "exchange",
             "status": "active" if self._running else "disabled",
             "enabled": True,
             "api_calls": 0,
             "errors": 0,
             "estimated_cost": 0.0,
-            "balance": self._kalshi_balance,
+            "balance": self._exchange_balance,
             "balance_label": "Account balance",
             "last_call_at": None,
             "interval_seconds": None,
@@ -330,8 +355,16 @@ class TradingBot:
     def _init_equities(self) -> None:
         """Set up all equities-specific components."""
         from app.brokers import build_broker_adapter
+        from app.llm import LocalLLMService
+        from app.regime.detector import MarketRegimeDetector
+        from app.stocks.decision import (
+            DecisionStore,
+            PerformanceTracker,
+            StockDecisionEngine,
+        )
         from app.stocks.execution import StockExecutionEngine
         from app.stocks.features import StockFeatureEngine
+        from app.stocks.ml import StockMLPredictor
         from app.stocks.risk import StockRiskManager
         from app.stocks.strategies import ALL_STOCK_STRATEGIES
         from app.stocks.universe import StockUniverseManager
@@ -346,14 +379,127 @@ class TradingBot:
             self._settings, self._broker.market_data
         )
         self._stock_strategies = [cls() for cls in ALL_STOCK_STRATEGIES]
+        # Keep a handle on the news-gated strategy so the NLP hook can push
+        # bullish/bearish sentiment into its watchlist.
+        self._news_gated = next(
+            (s for s in self._stock_strategies if s.name == "stock_news_gated"), None
+        )
         self._stock_feature_engines: dict[str, StockFeatureEngine] = {}
         self._active_markets: list[Market] = []
+        # Order-dedup state: symbols currently held at the broker, and the last
+        # time we submitted an order per symbol (per-symbol cooldown).
+        self._stock_held_symbols: set[str] = set()
+        self._stock_last_order_ts: dict[str, float] = {}
+        self._stock_order_cooldown = float(
+            getattr(self._settings, "stock_order_cooldown_seconds", 300.0)
+        )
+        # When True, bearish signals on flat names open shorts (sell-to-open)
+        # instead of being ignored. Requires a margin-enabled Alpaca account.
+        self._allow_shorts = bool(getattr(self._settings, "stock_allow_shorts", False))
+        # Position ledger keyed by symbol: tracks entry strategy/price/time,
+        # peak price (for trailing), and last unrealized PnL so we can attribute
+        # realized PnL to the originating strategy when a position closes.
+        self._stock_positions: dict[str, dict] = {}
+        # Last bar timestamp fed to the regime detector per index symbol, so the
+        # regime is sampled once per new bar (not every 5s loop tick).
+        self._regime_last_bar_ts: dict[str, Any] = {}
+        # Strategies auto-paused for being net-losing (recomputed in housekeeping).
+        self._stock_disabled_strategies: set[str] = set()
+        # Throttle timestamps for the intelligence-loop heartbeat logs so the
+        # operator can see why no trades fire without flooding the log.
+        self._stock_last_heartbeat_ts = 0.0
+        self._stock_last_closed_log_ts = 0.0
+        # Daily ML auto-retrain bookkeeping: the ET date we last retrained on, so
+        # it fires at most once per calendar day, and a guard so a slow retrain
+        # never overlaps itself.
+        self._stock_last_retrain_date: str | None = None
+        self._stock_retrain_in_progress = False
+
+        # Hook the NLP pipeline so every classified headline updates the
+        # hot-ticker tracker (drives news_driven / news_plus_movers modes)
+        # and the per-symbol news context cache (consumed by the L3 LLM).
+        self._nlp_pipeline.add_classified_hook(self._on_news_classified)
+
+        # Relevance pre-gate: only LLM-classify headlines that name a tradeable
+        # ticker/company. Hot-ticker discovery already falls back to this same
+        # resolver, so the gate costs no discovery while sparing the local model
+        # from classifying hundreds of irrelevant headlines each cycle.
+        if self._settings.news_relevance_prefilter:
+            _resolver = self._stock_universe.resolver
+            self._nlp_pipeline.set_prefilter(
+                lambda text: bool(_resolver.resolve_text(text))
+            )
+
+        # Three-layer decision support.
+        self._stock_decision_engine = StockDecisionEngine(
+            self._settings, risk_manager=self._stock_risk
+        )
+        self._stock_decision_store = DecisionStore()
+        self._stock_performance = PerformanceTracker()
+        self._stock_regime = MarketRegimeDetector(
+            lookback=self._settings.regime_lookback_bars,
+        )
+        self._stock_ml = StockMLPredictor.load(self._settings.stock_ml_model_path)
+        logger.info(
+            "stock_ml_loaded",
+            path=self._settings.stock_ml_model_path,
+            version=self._stock_ml.version,
+            active=self._stock_ml.is_ready,
+        )
+        self._stock_llm_service = LocalLLMService(self._settings)
+
+        # Per-symbol news context cache for the LLM (latest headline string).
+        self._stock_news_context: dict[str, str] = {}
 
         self._health_server = HealthServer(
             portfolio_snapshot_fn=self._portfolio.get_snapshot,
             is_halted_fn=lambda: self._stock_risk.is_halted,
             ws_connected_fn=lambda: self._broker.streaming.is_connected,
         )
+
+    def _on_news_classified(self, item, classification) -> None:
+        """NLP-pipeline hook: feed classified headlines into stock plumbing."""
+        if not self._is_equities:
+            return
+        tracker = getattr(self._stock_universe, "hot_tracker", None)
+        if tracker is None:
+            return
+        try:
+            touched = tracker.ingest(classification, item.text)
+        except Exception:
+            logger.exception("stock_news_ingest_failed")
+            return
+
+        for ticker in touched:
+            try:
+                self._stock_news_context[ticker] = item.text[:240]
+            except Exception:
+                continue
+
+        # Feed directional sentiment into the news-gated strategy so confident,
+        # relevant bullish headlines about a tracked ticker can open the gate.
+        if self._news_gated is not None and touched:
+            try:
+                from app.nlp.signals import SentimentDirection
+
+                min_conf = getattr(self._nlp_pipeline, "_min_confidence", 0.1)
+                min_rel = getattr(self._nlp_pipeline, "_min_relevance", 0.1)
+                sentiment = getattr(classification, "sentiment", None)
+                confidence = float(getattr(classification, "confidence", 0.0) or 0.0)
+                relevance = float(getattr(classification, "relevance", 0.0) or 0.0)
+                bullish = (
+                    sentiment == SentimentDirection.BULLISH
+                    and confidence >= min_conf
+                    and relevance >= min_rel
+                )
+                bearish = sentiment == SentimentDirection.BEARISH
+                for ticker in touched:
+                    if bullish:
+                        self._news_gated.update_sentiment(ticker, True)
+                    elif bearish:
+                        self._news_gated.update_sentiment(ticker, False)
+            except Exception:
+                logger.exception("stock_news_gate_update_failed")
 
     def _build_nlp_pipeline(self) -> NlpPipeline:
         llm = build_llm_classifier(
@@ -415,6 +561,12 @@ class TradingBot:
         if name == "finnhub":
             return FinnhubProvider(api_key=self._settings.finnhub_api_key)
         if name in ("sports", "betstack"):
+            # Sports/betstack feeds prediction-market parlays; in equities mode
+            # it only adds hundreds of irrelevant headlines that waste the local
+            # LLM. Skip it so the Jetson spends classification on stock news.
+            if self._is_equities:
+                logger.info("nlp_provider_skipped_equities", name=name)
+                return None
             leagues = [
                 l.strip()
                 for l in self._settings.sports_leagues.split(",")
@@ -451,7 +603,7 @@ class TradingBot:
         # Fetch actual exchange balance and sync portfolio
         try:
             exchange_balance = await self._adapter.execution.get_balance()
-            self._kalshi_balance = exchange_balance
+            self._exchange_balance = exchange_balance
             if exchange_balance > 0:
                 self._portfolio._cash = exchange_balance
                 self._portfolio._initial_cash = exchange_balance
@@ -460,7 +612,7 @@ class TradingBot:
                 logger.warning(
                     "exchange_balance_zero",
                     balance=exchange_balance,
-                    hint="API returned $0. Check that API credentials are valid and KALSHI_DEMO_MODE matches your intended account.",
+                    hint="API returned $0. Check that API credentials are valid for your intended account.",
                 )
         except Exception as e:
             logger.warning("exchange_balance_fetch_failed", error=str(e))
@@ -632,16 +784,35 @@ class TradingBot:
 
         logger.info("stocks_loaded", count=len(symbols), symbols=symbols[:10])
 
+        # Prime each engine with recent history so indicators (EMA/VWAP/ATR…)
+        # are valid immediately instead of waiting ~50 minutes for live bars.
+        # Pull enough bars to also fill the regime lookback in one shot.
+        warmup_bars = max(60, int(self._settings.regime_lookback_bars) + 10)
+        await self._warmup_stock_bars(symbols, limit=warmup_bars, seed_regime=True)
+
+        # Know what we already hold before placing any orders (dedup guard).
+        await self._sync_broker_positions()
+
+        # Wire the live minute-bar stream into the feature engines.
+        self._broker.streaming.on("bar", self._on_stock_bar)
+        await self._broker.streaming.subscribe_bars(symbols)
+
         await self._health_server.start()
         self._running = True
         self._portfolio.start_new_day()
 
-        await asyncio.gather(
+        tasks: list[asyncio.Task | Any] = [
             self._broker.streaming.connect(),
             self._stock_intelligence_loop(),
             self._stock_housekeeping_loop(),
+            self._stock_position_management_loop(),
             self._news_service.start(),
-        )
+        ]
+        if self._stock_universe.is_dynamic:
+            tasks.append(self._stock_universe_refresh_loop())
+        if getattr(self._settings, "stock_ml_auto_retrain", False):
+            tasks.append(self._stock_ml_retrain_loop())
+        await asyncio.gather(*tasks)
 
     async def _stop_equities(self) -> None:
         await self._news_service.stop()
@@ -651,8 +822,284 @@ class TradingBot:
         await self._repository.close()
         logger.info("bot_stopped_equities")
 
+    @staticmethod
+    def _bar_from_dict(symbol: str, b: dict) -> "StockBar":
+        """Build a StockBar from a market-data / stream dict (tolerant of str timestamps)."""
+        from datetime import datetime
+
+        from app.stocks.models import StockBar
+
+        ts = b.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except Exception:
+                ts = utc_now()
+        elif ts is None:
+            ts = utc_now()
+        return StockBar(
+            symbol=symbol,
+            open=float(b.get("open", 0) or 0),
+            high=float(b.get("high", 0) or 0),
+            low=float(b.get("low", 0) or 0),
+            close=float(b.get("close", 0) or 0),
+            volume=int(b.get("volume", 0) or 0),
+            timestamp=ts,
+            vwap=b.get("vwap"),
+        )
+
+    async def _warmup_stock_bars(
+        self, symbols: list[str], limit: int = 60, *, seed_regime: bool = False
+    ) -> None:
+        """Backfill each engine with recent 1-minute bars via REST.
+
+        When ``seed_regime`` is set, SPY/QQQ closes are also pushed into the
+        regime detector so it has a full lookback window immediately on
+        startup. Without this the regime is starved (~1 close/min off the thin
+        IEX feed) and reports a flat low-volatility regime for ~an hour after
+        every restart, suppressing the trend strategies.
+        """
+        warmed = 0
+        total_bars = 0
+        seeded_regime = 0
+        for sym in symbols:
+            engine = self._stock_feature_engines.get(sym)
+            if engine is None:
+                continue
+            try:
+                bars = await self._broker.market_data.get_bars(sym, "1Min", limit=limit)
+            except Exception as exc:
+                logger.warning("stock_warmup_failed", symbol=sym, error=str(exc))
+                continue
+            for b in bars:
+                try:
+                    engine.add_bar(self._bar_from_dict(sym, b))
+                    total_bars += 1
+                except Exception:
+                    continue
+            if seed_regime and sym.upper() in ("SPY", "QQQ"):
+                for b in bars:
+                    close = float(b.get("close", 0) or 0)
+                    if close > 0:
+                        self._stock_regime.update_close(sym, close)
+                        seeded_regime += 1
+            if bars:
+                warmed += 1
+        logger.info(
+            "stock_bars_warmed",
+            symbols=warmed,
+            total_bars=total_bars,
+            regime_closes=seeded_regime,
+        )
+
+    # Strategy families for regime-based biasing.
+    _TREND_STRATEGIES = {"stock_momentum", "stock_breakout", "stock_pullback"}
+    _MEANREV_STRATEGIES = {"stock_mean_reversion"}
+
+    def _regime_strategy_weight(self, strategy_name: str, regime) -> float:
+        """Bias L1 selection toward strategies that fit the current regime."""
+        if regime is None:
+            return 1.0
+        try:
+            if regime.prefers_momentum:
+                if strategy_name in self._TREND_STRATEGIES:
+                    return 1.15
+                if strategy_name in self._MEANREV_STRATEGIES:
+                    return 0.7
+            elif regime.prefers_mean_reversion:
+                if strategy_name in self._MEANREV_STRATEGIES:
+                    return 1.15
+                if strategy_name in self._TREND_STRATEGIES:
+                    return 0.8
+        except Exception:
+            return 1.0
+        return 1.0
+
+    def _order_skip_reason(self, symbol: str, action: str) -> str:
+        """Dedup gate: return "" if an order may be placed, else a short reason.
+
+        The intelligence loop re-evaluates every symbol every few seconds, so
+        without this gate a persistent signal would fire an order every tick.
+        Returning the reason (instead of a bare bool) lets the heartbeat explain
+        exactly why an actionable decision didn't turn into an order.
+        """
+        sym = symbol.upper()
+        now = time.time()
+
+        # Per-symbol cooldown after a recent submit.
+        if now - self._stock_last_order_ts.get(sym, 0.0) < self._stock_order_cooldown:
+            return "cooldown"
+
+        # Don't stack orders while one is still pending for this symbol.
+        try:
+            if any(o.symbol.upper() == sym for o in self._stock_execution.active_orders):
+                return "pending_order"
+        except Exception:
+            pass
+
+        already_held = sym in self._stock_held_symbols
+        if action == "buy":
+            # Already long → don't add; cap distinct holdings at max-open-positions.
+            if already_held:
+                return "already_held"
+            max_open = int(getattr(self._settings, "stock_max_open_positions", 0) or 0)
+            if max_open > 0 and len(self._stock_held_symbols) >= max_open:
+                return "max_open_positions"
+            return ""
+        if action == "sell":
+            # Holding a long → this sell closes it (always allowed).
+            if already_held:
+                return ""
+            # Flat: a sell opens a short. Only when shorting is enabled, and
+            # subject to the same distinct-holdings cap as longs.
+            if not self._allow_shorts:
+                return "not_held"
+            max_open = int(getattr(self._settings, "stock_max_open_positions", 0) or 0)
+            if max_open > 0 and len(self._stock_held_symbols) >= max_open:
+                return "max_open_positions"
+            return ""
+        return "unknown_action"
+
+    def _should_place_order(self, symbol: str, action: str) -> bool:
+        return self._order_skip_reason(symbol, action) == ""
+
+    async def _sync_broker_positions(self) -> None:
+        """Reconcile local state with broker truth.
+
+        - refreshes ``_stock_held_symbols`` (dedup + max-open enforcement)
+        - updates the position ledger (entry price, peak, unrealized PnL)
+        - detects positions that closed since the last sync (e.g. a bracket
+          stop/target filled) and attributes realized PnL to the strategy via
+          the risk manager and performance tracker.
+        """
+        try:
+            positions = await self._broker.execution.get_positions()
+        except Exception as exc:
+            logger.warning("broker_positions_sync_failed", error=str(exc))
+            return
+
+        held: set[str] = set()
+        seen_now: dict[str, dict] = {}
+        for p in positions:
+            sym = str(p.get("symbol", "")).upper()
+            qty = float(p.get("qty", 0) or 0)
+            if not sym or abs(qty) == 0:
+                continue
+            held.add(sym)
+            seen_now[sym] = p
+            entry = self._stock_positions.get(sym)
+            cur_price = float(p.get("current_price", 0) or 0)
+            avg_entry = float(p.get("avg_entry_price", 0) or 0)
+            unrealized = float(p.get("unrealized_pl", 0) or 0)
+            if entry is None:
+                # Position we didn't open this session (or pre-existing).
+                entry = {
+                    "strategy": "unknown",
+                    "entry_price": avg_entry or cur_price,
+                    "qty": qty,
+                    "opened_at": time.time(),
+                    "peak_price": cur_price or avg_entry,
+                    "trough_price": cur_price or avg_entry,
+                }
+                self._stock_positions[sym] = entry
+            entry["qty"] = qty
+            if avg_entry > 0:
+                entry["entry_price"] = avg_entry
+            if cur_price > 0:
+                entry["peak_price"] = max(entry.get("peak_price", 0.0), cur_price)
+                prev_trough = entry.get("trough_price", 0.0) or cur_price
+                entry["trough_price"] = min(prev_trough, cur_price)
+                entry["last_price"] = cur_price
+            entry["unrealized_pl"] = unrealized
+
+        # Detect closes: symbols we had in the ledger but the broker no longer
+        # reports → realize their last-known PnL against the strategy.
+        for sym in list(self._stock_positions.keys()):
+            if sym in held:
+                continue
+            closed = self._stock_positions.pop(sym)
+            pnl = float(closed.get("unrealized_pl", 0.0) or 0.0)
+            strategy = closed.get("strategy", "unknown")
+            try:
+                self._stock_risk.record_fill(pnl, symbol=sym)
+            except Exception:
+                logger.exception("record_fill_failed", symbol=sym)
+            try:
+                self._stock_performance.record_fill(
+                    symbol=sym, strategy=strategy, pnl=pnl
+                )
+            except Exception:
+                logger.exception("perf_record_fill_failed", symbol=sym)
+            logger.info(
+                "stock_position_closed", symbol=sym, strategy=strategy, pnl=round(pnl, 2)
+            )
+
+        self._stock_held_symbols = held
+
+    def _record_entry(self, symbol: str, strategy: str, price: float, qty: int) -> None:
+        """Seed the position ledger when we submit an entry (refined on sync).
+
+        ``qty`` is signed: positive for a long, negative for a short, so the
+        trailing-stop logic and PnL attribution know the direction.
+        """
+        sym = symbol.upper()
+        self._stock_positions[sym] = {
+            "strategy": strategy,
+            "entry_price": float(price),
+            "qty": int(qty),
+            "opened_at": time.time(),
+            "peak_price": float(price),
+            "trough_price": float(price),
+            "last_price": float(price),
+            "unrealized_pl": 0.0,
+        }
+
+    async def _on_stock_bar(self, data: dict) -> None:
+        """Ingest a live minute bar from the Alpaca stream into the feature engine."""
+        symbol = data.get("symbol", "")
+        engine = self._stock_feature_engines.get(symbol)
+        if engine is None:
+            return
+        try:
+            engine.add_bar(self._bar_from_dict(symbol, data))
+        except Exception:
+            logger.exception("stock_bar_ingest_failed", symbol=symbol)
+
+    def _build_tech_context(self, features) -> str:
+        """Compact indicator summary used in the LLM prompt."""
+        return (
+            f"price={features.last_price:.2f} vwap={features.vwap:.2f} "
+            f"dist_vwap={features.distance_from_vwap_pct:+.2f}% "
+            f"ema9={features.ema_9:.2f} ema21={features.ema_21:.2f} "
+            f"ema50={features.ema_50:.2f} rsi={features.rsi_14:.1f} "
+            f"macd_hist={features.macd_hist:+.3f} atr={features.atr_14:.2f} "
+            f"vol_surge={features.volume_surge_ratio:.2f} "
+            f"trend={features.trend_strength:+.2f} "
+            f"htf_trend={features.htf_trend:+.2f} htf_rsi={features.htf_rsi:.1f} "
+            f"mtf_align={features.mtf_alignment:+.2f} "
+            f"gap={features.gap_pct:+.2f}% rs_spy={features.rel_strength_spy:+.3f}"
+        )
+
     async def _stock_intelligence_loop(self) -> None:
-        """Main loop for equities trading."""
+        """Main loop for equities trading.
+
+        Runs the full three-layer decision pipeline per symbol per tick:
+
+            L1 strategies → L2 ML probability → L3 LLM verdict
+                                 │
+                                 ▼
+                       StockDecisionEngine.evaluate
+                                 │
+                                 ▼
+                  Risk manager (deterministic gate)
+                                 │
+                                 ▼
+                       StockExecutionEngine
+
+        Every evaluation produces a ``StockDecisionTrace`` stored in the
+        decision store so the GUI can show what was decided and why,
+        even when a trade was blocked.
+        """
         while self._running:
             await asyncio.sleep(5.0)
 
@@ -661,38 +1108,279 @@ class TradingBot:
                 continue
 
             if not self._settings.allow_extended_hours and not self._broker.is_market_open():
+                # Explain the silence: log once every 5 min so it's obvious the
+                # bot is alive and intentionally idle until the bell.
+                now_ts = time.time()
+                if now_ts - self._stock_last_closed_log_ts >= 300.0:
+                    self._stock_last_closed_log_ts = now_ts
+                    # Countdown to the next regular open so it's obvious how long
+                    # the bot will stay idle (DST-aware via the broker).
+                    minutes_to_open: float | None = None
+                    next_open_et: str | None = None
+                    try:
+                        from datetime import datetime, timezone
+                        nxt = self._broker.next_market_open()
+                        minutes_to_open = round(
+                            (nxt - datetime.now(timezone.utc)).total_seconds() / 60.0,
+                            1,
+                        )
+                        try:
+                            from zoneinfo import ZoneInfo
+                            next_open_et = nxt.astimezone(
+                                ZoneInfo("America/New_York")
+                            ).strftime("%Y-%m-%d %H:%M %Z")
+                        except Exception:
+                            next_open_et = nxt.isoformat()
+                    except Exception:
+                        pass
+                    logger.info(
+                        "stock_market_closed_idle",
+                        minutes_to_open=minutes_to_open,
+                        next_open_et=next_open_et,
+                        hint="regular hours only; set ALLOW_EXTENDED_HOURS=true to trade pre/post market",
+                    )
                 continue
 
-            for symbol, engine in self._stock_feature_engines.items():
+            # Refresh regime from SPY/QQQ — but only feed a close once per NEW
+            # bar (features.timestamp is the last bar time) so the configured
+            # lookback is in bars/minutes, not 5-second snapshots.
+            spy_atr_pct = 0.0
+            for sym in ("SPY", "QQQ"):
+                fe = self._stock_feature_engines.get(sym)
+                if fe is None:
+                    continue
+                try:
+                    f = fe.compute()
+                    if f.last_price > 0 and self._regime_last_bar_ts.get(sym) != f.timestamp:
+                        self._regime_last_bar_ts[sym] = f.timestamp
+                        self._stock_regime.update_close(sym, f.last_price)
+                    if sym == "SPY" and f.last_price > 0 and f.atr_14 > 0:
+                        spy_atr_pct = f.atr_14 / f.last_price
+                except Exception:
+                    continue
+            try:
+                self._stock_regime.evaluate(atr_pct=spy_atr_pct)
+            except Exception:
+                pass
+            regime = self._stock_regime.last
+
+            # Benchmark return for relative-strength feature.
+            spy_engine = self._stock_feature_engines.get("SPY")
+            spy_ret_15 = spy_engine.recent_return(15) if spy_engine is not None else 0.0
+
+            # Per-scan tallies so the heartbeat can explain why nothing traded.
+            scan_evaluated = 0
+            scan_priced = 0
+            scan_l1_signals = 0
+            scan_buys = 0
+            scan_sells = 0
+            scan_shorts = 0
+            scan_orders = 0
+            scan_blocks: dict[str, int] = {}
+
+            # Snapshot the engine map — the universe-refresh loop can mutate it
+            # while this loop awaits (quote/LLM), which would break iteration.
+            for symbol, engine in list(self._stock_feature_engines.items()):
                 try:
                     quote_data = await self._broker.market_data.get_quote(symbol)
-                    engine.update_quote(
-                        bid=quote_data.get("bid", 0),
-                        ask=quote_data.get("ask", 0),
-                        last=quote_data.get("last", quote_data.get("bid", 0)),
-                    )
+                    bid = float(quote_data.get("bid", 0) or 0)
+                    ask = float(quote_data.get("ask", 0) or 0)
+                    # Only update the quote when we actually got prices; a failed
+                    # quote returns bid=ask=0 and must NOT clobber the last bar
+                    # close (compute() falls back to it for last_price).
+                    if bid > 0 or ask > 0:
+                        if bid > 0 and ask > 0:
+                            last = (bid + ask) / 2.0
+                        else:
+                            last = bid or ask
+                        engine.update_quote(bid=bid, ask=ask, last=last)
 
                     features = engine.compute()
+                    scan_evaluated += 1
+                    if features.last_price > 0:
+                        scan_priced += 1
+                    # Relative strength vs SPY over the last ~15 bars.
+                    features.rel_strength_spy = engine.recent_return(15) - spy_ret_15
                     portfolio_snap = self._portfolio.get_snapshot()
 
+                    # L1 — pick the best strategy signal, biased by how well the
+                    # strategy fits the current market regime.
+                    best_signal = None
+                    best_score = -1.0
                     for strat in self._stock_strategies:
+                        if strat.name in self._stock_disabled_strategies:
+                            continue
                         try:
                             sig = strat.generate_signal(features, portfolio_snap)
-                            if sig is not None and sig.action.value != "HOLD":
-                                await self._stock_execution.process_signal(
-                                    sig, features, portfolio_snap, broker=self._broker
-                                )
                         except Exception:
                             logger.exception("stock_strategy_error", strategy=strat.name)
+                            continue
+                        if sig is None or sig.action.value == "HOLD":
+                            continue
+                        score = sig.confidence * self._regime_strategy_weight(
+                            strat.name, regime
+                        )
+                        if score > best_score:
+                            best_score = score
+                            best_signal = sig
+                    if best_signal is None:
+                        scan_blocks["no_l1_signal"] = scan_blocks.get("no_l1_signal", 0) + 1
+                        continue
+                    scan_l1_signals += 1
+
+                    # L2 — ML probability of upward move.
+                    ml_pred = self._stock_ml.predict(features)
+
+                    # L3 — local LLM verdict (always a valid object).
+                    news_ctx = self._stock_news_context.get(symbol.upper(), "")
+                    try:
+                        from app.llm.service import LLMRequest
+                        llm_verdict = await self._stock_llm_service.evaluate(
+                            LLMRequest(
+                                ticker=symbol,
+                                technical_context=self._build_tech_context(features),
+                                news_context=news_ctx,
+                            )
+                        )
+                    except Exception:
+                        from app.llm.schema import safe_default_verdict
+                        llm_verdict = safe_default_verdict(symbol, "llm exception")
+
+                    # Three-layer decision + deterministic risk gate.
+                    trace = self._stock_decision_engine.evaluate(
+                        ticker=symbol,
+                        features=features,
+                        portfolio=portfolio_snap,
+                        l1_signal=best_signal,
+                        ml_prediction=ml_pred,
+                        llm_verdict=llm_verdict,
+                        regime=regime,
+                        broker=self._broker,
+                    )
+                    self._stock_decision_store.add(trace)
+                    if trace.action.value == "buy":
+                        scan_buys += 1
+                    elif trace.action.value == "sell":
+                        scan_sells += 1
+                    elif trace.blocked_reason:
+                        key = _block_category(trace.blocked_reason)
+                        scan_blocks[key] = scan_blocks.get(key, 0) + 1
+                    # Persist only actionable or risk-blocked decisions for
+                    # offline analysis / outcome labeling — skip the routine
+                    # "no signal / below threshold" rows to keep DB writes light.
+                    reason = trace.blocked_reason or ""
+                    if trace.action.value in {"buy", "sell"} or reason.startswith("risk"):
+                        try:
+                            await self._repository.save_stock_decision(trace.to_dict())
+                        except Exception:
+                            pass
+
+                    if trace.action.value in {"buy", "sell"}:
+                        sym_u = symbol.upper()
+                        held_now = sym_u in self._stock_held_symbols
+                        # Classify intent: a buy on a flat name or a short-sell on
+                        # a flat name opens exposure (entry); a sell on a held long
+                        # closes it (exit).
+                        is_entry = trace.action.value == "buy" or (
+                            trace.action.value == "sell" and not held_now
+                        )
+                        skip = self._order_skip_reason(symbol, trace.action.value)
+                        if skip and skip != "not_held":
+                            # not_held is the normal long-only case (already
+                            # counted as sells_skipped); surface the rest so the
+                            # buy→order gap is explained in the heartbeat.
+                            k = f"skip:{skip}"
+                            scan_blocks[k] = scan_blocks.get(k, 0) + 1
+                        elif not skip:
+                            record = await self._stock_execution.process_signal(
+                                best_signal,
+                                features,
+                                portfolio_snap,
+                                broker=self._broker,
+                                is_entry=is_entry,
+                            )
+                            if record is not None and record.status != "rejected":
+                                scan_orders += 1
+                                self._stock_last_order_ts[sym_u] = time.time()
+                                if is_entry:
+                                    # Long buy → +qty; short sell → -qty so the
+                                    # ledger/trailing logic knows the direction.
+                                    signed_qty = (
+                                        record.quantity
+                                        if trace.action.value == "buy"
+                                        else -record.quantity
+                                    )
+                                    self._stock_held_symbols.add(sym_u)
+                                    self._record_entry(
+                                        symbol, trace.strategy,
+                                        record.price, signed_qty,
+                                    )
+                                    if trace.action.value == "sell":
+                                        scan_shorts += 1
+                            else:
+                                rej = (
+                                    record.status
+                                    if record is not None
+                                    else "no_record"
+                                )
+                                k = f"order_rejected:{rej}"
+                                scan_blocks[k] = scan_blocks.get(k, 0) + 1
 
                 except Exception as exc:
                     logger.error("stock_loop_error", symbol=symbol, error=str(exc))
                     metrics.increment("stock_loop_errors")
 
+            # Heartbeat: once a minute, summarize the scan so it's clear what the
+            # bot saw and why it did (or didn't) trade — no more silent loops.
+            now_ts = time.time()
+            if now_ts - self._stock_last_heartbeat_ts >= 60.0:
+                self._stock_last_heartbeat_ts = now_ts
+                top_blocks = dict(
+                    sorted(scan_blocks.items(), key=lambda kv: kv[1], reverse=True)[:4]
+                )
+                regime_name = (
+                    regime.regime.value
+                    if regime is not None and hasattr(regime, "regime")
+                    else None
+                )
+                logger.info(
+                    "stock_scan_summary",
+                    symbols=len(self._stock_feature_engines),
+                    evaluated=scan_evaluated,
+                    priced=scan_priced,
+                    l1_signals=scan_l1_signals,
+                    buys=scan_buys,
+                    sells=scan_sells,
+                    shorts=scan_shorts,  # bearish entries (0 when shorting disabled)
+                    orders=scan_orders,
+                    held=len(self._stock_held_symbols),
+                    regime=regime_name,
+                    blocks=top_blocks,
+                )
+
+    def _refresh_disabled_strategies(self) -> None:
+        """Pause strategies that are net-losing after a minimum trade sample."""
+        if not getattr(self._settings, "stock_strategy_auto_disable", False):
+            return
+        min_trades = int(getattr(self._settings, "stock_strategy_min_trades_eval", 8))
+        try:
+            by_strategy = self._stock_performance.summary().by_strategy
+        except Exception:
+            return
+        disabled: set[str] = set()
+        for name, stats in by_strategy.items():
+            if stats.get("trades", 0) >= min_trades and stats.get("pnl", 0.0) < 0:
+                disabled.add(name)
+        if disabled != self._stock_disabled_strategies:
+            logger.info("stock_strategies_disabled", strategies=sorted(disabled))
+        self._stock_disabled_strategies = disabled
+
     async def _stock_housekeeping_loop(self) -> None:
         """Periodic maintenance for equities mode."""
         while self._running:
             await asyncio.sleep(60.0)
+            await self._sync_broker_positions()
+            self._refresh_disabled_strategies()
             try:
                 snap = self._portfolio.get_snapshot()
                 await self._repository.save_pnl_snapshot(
@@ -705,6 +1393,280 @@ class TradingBot:
                 await self._repository.flush()
             except Exception as exc:
                 logger.error("stock_housekeeping_error", error=str(exc))
+
+    async def _stock_position_management_loop(self) -> None:
+        """Manage open positions beyond the broker's bracket legs.
+
+        The entry bracket already carries a stop and take-profit at Alpaca, so
+        this loop adds: (1) end-of-day flatten, (2) a max-holding time stop, and
+        (3) an optional bot-side trailing stop once a position is in profit. All
+        exits cancel the symbol's resting orders first so bracket legs don't get
+        orphaned, then close the position.
+        """
+        flatten_min = float(getattr(self._settings, "stock_eod_flatten_minutes", 0) or 0)
+        max_hold_min = float(getattr(self._settings, "stock_max_holding_minutes", 0) or 0)
+        trail_pct = float(getattr(self._settings, "stock_trailing_stop_pct", 0) or 0)
+
+        while self._running:
+            await asyncio.sleep(20.0)
+            try:
+                # 1) End-of-day flatten.
+                if flatten_min > 0:
+                    try:
+                        mins_left = self._broker.minutes_to_close()
+                    except Exception:
+                        mins_left = 1e9
+                    if 0 < mins_left <= flatten_min and self._stock_held_symbols:
+                        logger.info("stock_eod_flatten", minutes_to_close=round(mins_left, 1))
+                        for sym in list(self._stock_held_symbols):
+                            await self._close_stock_position(sym, "eod_flatten")
+                        continue
+
+                now = time.time()
+                for sym in list(self._stock_positions.keys()):
+                    entry = self._stock_positions.get(sym)
+                    if entry is None:
+                        continue
+                    # 2) Time stop.
+                    if max_hold_min > 0:
+                        age_min = (now - entry.get("opened_at", now)) / 60.0
+                        if age_min >= max_hold_min:
+                            await self._close_stock_position(sym, "time_stop")
+                            continue
+                    # 3) Trailing stop (only once in profit). Direction-aware:
+                    # longs trail the peak (exit on a fall), shorts trail the
+                    # trough (exit on a rise).
+                    if trail_pct > 0:
+                        last = float(entry.get("last_price", 0) or 0)
+                        ep = float(entry.get("entry_price", 0) or 0)
+                        is_short = float(entry.get("qty", 0) or 0) < 0
+                        if is_short:
+                            trough = float(entry.get("trough_price", 0) or 0)
+                            if (
+                                0 < trough < ep and last > 0
+                                and last >= trough * (1 + trail_pct)
+                            ):
+                                await self._close_stock_position(sym, "trailing_stop")
+                                continue
+                        else:
+                            peak = float(entry.get("peak_price", 0) or 0)
+                            if peak > ep > 0 and last > 0 and last <= peak * (1 - trail_pct):
+                                await self._close_stock_position(sym, "trailing_stop")
+                                continue
+            except Exception as exc:
+                logger.error("stock_position_mgmt_error", error=str(exc))
+
+    async def _close_stock_position(self, symbol: str, reason: str) -> None:
+        """Cancel the symbol's resting orders then flatten the position."""
+        sym = symbol.upper()
+        try:
+            await self._broker.execution.cancel_orders_for_symbol(sym)
+        except Exception:
+            pass
+        try:
+            result = await self._broker.execution.close_position(sym)
+            logger.info(
+                "stock_position_flattened",
+                symbol=sym, reason=reason, status=result.get("status"),
+            )
+            self._stock_held_symbols.discard(sym)
+            self._stock_last_order_ts[sym] = time.time()
+        except Exception as exc:
+            logger.error("stock_close_position_failed", symbol=sym, error=str(exc))
+
+    async def _stock_ml_retrain_loop(self) -> None:
+        """Retrain the L2 model once per day after the close and hot-swap it.
+
+        Runs entirely off the critical path: the heavy work (bar download +
+        feature replay + fit) happens in a subprocess writing to a *temp* model
+        file, so a slow or failed retrain never blocks the event loop or
+        corrupts the live model. Only after the fresh model loads cleanly is it
+        atomically moved into place and swapped into ``self._stock_ml`` — no
+        restart required. Fires at most once per ET calendar day.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        retrain_hour = int(getattr(self._settings, "stock_ml_retrain_hour_et", 20))
+
+        while self._running:
+            await asyncio.sleep(900.0)  # check every 15 min
+            try:
+                now_et = datetime.now(et)
+                today = now_et.strftime("%Y-%m-%d")
+                # Once per day, only after the configured off-hours time, and
+                # never while the regular session is open.
+                if (
+                    self._stock_retrain_in_progress
+                    or self._stock_last_retrain_date == today
+                    or now_et.hour < retrain_hour
+                    or self._broker.is_market_open()
+                ):
+                    continue
+
+                self._stock_retrain_in_progress = True
+                self._stock_last_retrain_date = today
+                ok = await self._run_ml_retrain()
+                logger.info("stock_ml_retrain_cycle", date=today, success=ok)
+            except Exception as exc:
+                logger.error("stock_ml_retrain_loop_error", error=str(exc))
+            finally:
+                self._stock_retrain_in_progress = False
+
+    async def _run_ml_retrain(self) -> bool:
+        """Download fresh bars, train to a temp file, then hot-swap on success."""
+        import os
+        import sys
+        from datetime import datetime, timedelta, timezone
+        from pathlib import Path
+
+        python_exe = sys.executable
+        project_root = str(Path(__file__).resolve().parents[1])
+        s = self._settings
+        tickers = s.stock_ml_retrain_tickers
+        timeframe = s.stock_ml_retrain_timeframe
+        # Seed window used only when the store is empty; thereafter --append just
+        # adds the new day(s), so the dataset accumulates over time.
+        seed_start = (
+            datetime.now(timezone.utc).date()
+            - timedelta(days=int(s.stock_ml_retrain_seed_days))
+        ).isoformat()
+        data_dir = "data/bars"
+        live_path = s.stock_ml_model_path
+        tmp_path = f"{live_path}.tmp"
+
+        logger.info(
+            "stock_ml_retrain_started",
+            tickers=tickers, timeframe=timeframe, seed_start=seed_start,
+        )
+
+        async def _run(cmd: list[str]) -> bool:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await proc.communicate()
+            if proc.returncode != 0:
+                logger.error(
+                    "stock_ml_retrain_subprocess_failed",
+                    cmd=cmd[1] if len(cmd) > 1 else cmd[0],
+                    rc=proc.returncode,
+                    tail=(out or b"")[-500:].decode("utf-8", "replace"),
+                )
+                return False
+            return True
+
+        # 1) Accumulate bars: seed from seed_start on first run, then append-only
+        #    so the history grows by a day each night.
+        if not await _run([
+            python_exe, "scripts/download_stock_bars.py",
+            "--tickers", tickers, "--start", seed_start,
+            "--timeframe", timeframe, "--data-dir", data_dir,
+            "--feed", "iex", "--append",
+        ]):
+            return False
+
+        # 2) Train to a temp artifact (never clobber the live model on failure).
+        if not await _run([
+            python_exe, "scripts/train_stock_ml.py",
+            "--tickers", tickers, "--data-dir", data_dir,
+            "--horizon", str(s.stock_ml_retrain_horizon),
+            "--up-threshold", str(s.stock_ml_retrain_up_threshold),
+            "--out", tmp_path,
+        ]):
+            return False
+
+        # 3) Validate the fresh model loads and is usable, then hot-swap.
+        try:
+            from app.stocks.ml import StockMLPredictor
+            candidate = StockMLPredictor.load(tmp_path)
+            if not candidate.is_ready:
+                logger.error("stock_ml_retrain_invalid", reason="model not ready")
+                return False
+            os.replace(tmp_path, live_path)
+            self._stock_ml = candidate
+            logger.info(
+                "stock_ml_retrain_done",
+                path=live_path, version=candidate.version,
+            )
+            return True
+        except Exception as exc:
+            logger.error("stock_ml_retrain_swap_failed", error=str(exc))
+            return False
+
+    async def _stock_universe_refresh_loop(self) -> None:
+        """Periodically re-pick the active stock universe.
+
+        Only runs for dynamic modes (news_driven / top_movers / news_plus_movers).
+        Compares the new universe against the active feature engines; adds
+        engines for new tickers and removes engines for tickers that dropped
+        out (while preserving open positions — never auto-tears down a ticker
+        the portfolio still holds).
+        """
+        from app.stocks.features import StockFeatureEngine
+
+        interval = max(60.0, float(self._settings.stock_universe_refresh_seconds))
+        while self._running:
+            await asyncio.sleep(interval)
+            try:
+                new_symbols = await self._stock_universe.refresh()
+            except Exception as exc:
+                logger.warning("stock_universe_refresh_failed", error=str(exc))
+                continue
+
+            current = set(self._stock_feature_engines.keys())
+            target = set(new_symbols)
+
+            held: set[str] = set()
+            try:
+                snap = self._portfolio.get_snapshot()
+                for pos in snap.positions:
+                    if pos.size:
+                        held.add((pos.token_id or pos.instrument_id or "").upper())
+            except Exception:
+                pass
+
+            to_add = target - current
+            to_drop = (current - target) - held
+
+            for sym in sorted(to_add):
+                try:
+                    engine = StockFeatureEngine(sym)
+                    engine.start_new_day()
+                    self._stock_feature_engines[sym] = engine
+                except Exception:
+                    logger.exception("stock_feature_engine_add_failed", symbol=sym)
+
+            for sym in sorted(to_drop):
+                self._stock_feature_engines.pop(sym, None)
+                self._stock_news_context.pop(sym, None)
+
+            # Backfill history and (un)subscribe the live bar stream for the diff.
+            if to_add:
+                await self._warmup_stock_bars(sorted(to_add))
+                try:
+                    await self._broker.streaming.subscribe_bars(sorted(to_add))
+                except Exception:
+                    logger.exception("stock_bar_subscribe_failed", symbols=sorted(to_add))
+            if to_drop:
+                try:
+                    unsub = getattr(self._broker.streaming, "unsubscribe_bars", None)
+                    if unsub is not None:
+                        await unsub(sorted(to_drop))
+                except Exception:
+                    logger.exception("stock_bar_unsubscribe_failed", symbols=sorted(to_drop))
+
+            if to_add or to_drop:
+                logger.info(
+                    "stock_universe_diff_applied",
+                    added=sorted(to_add),
+                    dropped=sorted(to_drop),
+                    held_preserved=sorted(held & (current - target)),
+                    active=sorted(self._stock_feature_engines.keys()),
+                )
 
     async def _setup_market_instruments(self, markets: list[Market]) -> list[str]:
         """Register markets: save to DB, build instrument mapping and feature engines."""
@@ -1013,7 +1975,7 @@ class TradingBot:
             logger.error("position_persist_failed", error=str(e))
 
     async def _recover_positions(self) -> None:
-        """Recover positions — prefer live Kalshi data, fall back to local DB."""
+        """Recover positions — prefer live exchange data, fall back to local DB."""
         from app.data.models import OutcomeSide
 
         synced_from_exchange = False
@@ -1061,7 +2023,7 @@ class TradingBot:
         await self._sync_exchange_orders()
 
     async def _sync_exchange_orders(self) -> None:
-        """Import resting orders from Kalshi into the execution engine."""
+        """Import resting orders from the exchange into the execution engine."""
         try:
             exchange_orders = await self._adapter.execution.get_open_orders()
             imported = 0
@@ -1093,7 +2055,7 @@ class TradingBot:
         await self._sync_exchange_fills()
 
     async def _sync_exchange_fills(self) -> None:
-        """Import recent fills from Kalshi to seed the P&L history in the DB."""
+        """Import recent fills from the exchange to seed the P&L history in the DB."""
         try:
             fills = await self._adapter.execution.get_fills(limit=100)
             saved = 0
@@ -1417,7 +2379,7 @@ class TradingBot:
                                     normalized_confidence=odds_sig["confidence"],
                                     expected_edge=odds_sig["edge"],
                                     rationale=odds_sig["rationale"],
-                                    features_used=["sportsbook_consensus", "kalshi_price"],
+                                    features_used=["sportsbook_consensus", "market_price"],
                                 ))
 
                     # ── Decision Engine ──
@@ -1559,10 +2521,10 @@ class TradingBot:
                 if self._mode == TradingMode.LIVE:
                     await self._reconcile_positions()
 
-                # Persist LLM costs and refresh Kalshi balance
+                # Persist LLM costs and refresh exchange balance
                 await self._persist_api_costs()
                 try:
-                    self._kalshi_balance = await self._adapter.execution.get_balance()
+                    self._exchange_balance = await self._adapter.execution.get_balance()
                 except Exception:
                     pass
 
@@ -1583,7 +2545,7 @@ class TradingBot:
 @click.option("--markets", "-m", multiple=True, help="Market slugs to trade (default: dynamic universe selection)")
 @click.option("--strategy", "-s", default=None, help="Strategy name override")
 @click.option("--dry-run/--live", default=True, help="Dry run (default) or live trading")
-@click.option("--exchange", "-e", default=None, help="Exchange: polymarket or kalshi")
+@click.option("--exchange", "-e", default=None, help="Exchange: polymarket")
 def main(markets: tuple[str, ...], strategy: str | None, dry_run: bool, exchange: str | None) -> None:
     """Start the trading bot."""
     settings = get_settings()

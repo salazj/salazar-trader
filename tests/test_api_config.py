@@ -26,7 +26,7 @@ class TestConfigEndpoints:
     def test_validate_valid_config(self, client):
         resp = client.post("/api/config/validate", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": True,
         })
         assert resp.status_code == 200
@@ -37,7 +37,7 @@ class TestConfigEndpoints:
     def test_validate_invalid_asset_class(self, client):
         resp = client.post("/api/config/validate", json={
             "asset_class": "futures",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": True,
         })
         assert resp.status_code == 200
@@ -48,7 +48,7 @@ class TestConfigEndpoints:
     def test_validate_live_without_gates(self, client):
         resp = client.post("/api/config/validate", json={
             "asset_class": "prediction_markets",
-            "exchange": "kalshi",
+            "exchange": "polymarket",
             "dry_run": False,
             "enable_live_trading": False,
             "live_trading_acknowledged": False,

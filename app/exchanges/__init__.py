@@ -11,15 +11,12 @@ from app.exchanges.base import (
 
 def build_exchange_adapter(settings) -> BaseExchangeAdapter:
     """Factory: instantiate the correct adapter based on settings.exchange."""
-    from app.exchanges.kalshi.adapter import KalshiAdapter
     from app.exchanges.polymarket.adapter import PolymarketAdapter
 
     exchange = settings.exchange.lower()
     if exchange == "polymarket":
         return PolymarketAdapter(settings)
-    elif exchange == "kalshi":
-        return KalshiAdapter(settings)
-    raise ValueError(f"Unknown exchange: {exchange!r}. Expected 'polymarket' or 'kalshi'.")
+    raise ValueError(f"Unknown exchange: {exchange!r}. Expected 'polymarket'.")
 
 
 __all__ = [
