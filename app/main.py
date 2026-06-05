@@ -1106,8 +1106,30 @@ class TradingBot:
                 now_ts = time.time()
                 if now_ts - self._stock_last_closed_log_ts >= 300.0:
                     self._stock_last_closed_log_ts = now_ts
+                    # Countdown to the next regular open so it's obvious how long
+                    # the bot will stay idle (DST-aware via the broker).
+                    minutes_to_open: float | None = None
+                    next_open_et: str | None = None
+                    try:
+                        from datetime import datetime, timezone
+                        nxt = self._broker.next_market_open()
+                        minutes_to_open = round(
+                            (nxt - datetime.now(timezone.utc)).total_seconds() / 60.0,
+                            1,
+                        )
+                        try:
+                            from zoneinfo import ZoneInfo
+                            next_open_et = nxt.astimezone(
+                                ZoneInfo("America/New_York")
+                            ).strftime("%Y-%m-%d %H:%M %Z")
+                        except Exception:
+                            next_open_et = nxt.isoformat()
+                    except Exception:
+                        pass
                     logger.info(
                         "stock_market_closed_idle",
+                        minutes_to_open=minutes_to_open,
+                        next_open_et=next_open_et,
                         hint="regular hours only; set ALLOW_EXTENDED_HOURS=true to trade pre/post market",
                     )
                 continue
